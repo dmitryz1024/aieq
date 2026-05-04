@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "name": "Warm clarity",
+  "filters": [
+    {
+      "type": "low_shelf",
+      "freq": 85.0,
+      "q": 0.7,
+      "gain": 2.2
+    },
+    {
+      "type": "peaking",
+      "freq": 320.0,
+      "q": 1.1,
+      "gain": -1.8
+    },
+    {
+      "type": "peaking",
+      "freq": 2800.0,
+      "q": 1.0,
+      "gain": 1.4
+    },
+    {
+      "type": "high_shelf",
+      "freq": 9200.0,
+      "q": 0.75,
+      "gain": 1.2
+    }
+  ]
+}
+
