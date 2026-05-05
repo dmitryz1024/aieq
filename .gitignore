@@ -7,6 +7,11 @@ __pycache__/
 venv/
 env/
 .pytest_cache/
+.tmp/
+.tmp-pytest-run/
+aieq_test_*/
+pytest-cache-files-*/
+py_tmp_manual/
 .mypy_cache/
 .ruff_cache/
 dist/
@@ -15,4 +20,6 @@ build/
 .env
 *.sqlite3
 *.db
-
+models/*.gguf
+models/*.bin
+models/*.safetensors

@@ -9,24 +9,44 @@ description = "Windows parametric EQ prototype with AI preset editing"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "numpy>=1.26",
+    "numpy>=1.24.4,<1.25; python_version < '3.12'",
+    "numpy>=1.26; python_version >= '3.12'",
     "PySide6>=6.7",
     "pyqtgraph>=0.13.7",
     "sounddevice>=0.4.7",
-    "openai>=1.59.0",
 ]
 
 [project.optional-dependencies]
+ai = [
+    "llama-cpp-python>=0.3.7",
+]
+autoeq = [
+    "autoeq>=4.1.2; python_version < '3.12'",
+]
+build = [
+    "pyinstaller>=6.10",
+    "pillow>=10.0",
+]
 dev = [
     "pytest>=8.0",
 ]
+openai = [
+    "openai>=1.59.0",
+]
 
 [project.scripts]
-aieq = "aieq.main:main"
+aieq = "source.main:main"
 
 [tool.setuptools.packages.find]
-include = ["aieq*"]
+include = ["source*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
+[[tool.uv.index]]
+name = "llama-cpp-python-cpu"
+url = "https://abetlen.github.io/llama-cpp-python/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+llama-cpp-python = { index = "llama-cpp-python-cpu" }

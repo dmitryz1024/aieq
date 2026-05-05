@@ -6,7 +6,7 @@ from source.dsp import GRAPH_FREQS, design_fir_from_preset, envelope_response_db
 from source.models import EqFilter, Preset
 from source.audio import AudioEngine
 from source.curves import FrequencyCurve
-from source.autoeq_service import build_autoeq_preset
+from source.autoeq_service import build_autoeq_preset, build_autoeq_preset_result
 
 
 def test_zero_gain_peaking_is_flat() -> None:
@@ -41,10 +41,21 @@ def test_audio_engine_crossfades_updated_preset() -> None:
     assert engine.fade_from_processor is not None
 
 
-def test_autoeq_service_builds_filters_from_curves() -> None:
+def test_autoeq_service_builds_filters_from_curves(monkeypatch) -> None:
+    monkeypatch.setenv("AIEQ_AUTOEQ_BACKEND", "local")
     freqs = np.geomspace(20, 20000, 128)
     device = FrequencyCurve("Device", freqs, np.sin(np.linspace(0, 4, 128)) * 3)
     target = FrequencyCurve("Target", freqs, np.zeros_like(freqs))
     preset = build_autoeq_preset(device, target, max_filters=5)
     assert preset.name.startswith("AutoEQ")
     assert 1 <= len(preset.filters) <= 5
+
+
+def test_autoeq_local_backend_can_be_forced(monkeypatch) -> None:
+    monkeypatch.setenv("AIEQ_AUTOEQ_BACKEND", "local")
+    freqs = np.geomspace(20, 20000, 128)
+    device = FrequencyCurve("Device", freqs, np.sin(np.linspace(0, 4, 128)) * 3)
+    target = FrequencyCurve("Target", freqs, np.zeros_like(freqs))
+    result = build_autoeq_preset_result(device, target, max_filters=5)
+    assert result.backend == "local"
+    assert result.preset.name.startswith("AutoEQ")

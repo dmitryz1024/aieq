@@ -8,6 +8,7 @@ import pyqtgraph as pg
 from PySide6.QtCore import QObject, QSettings, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
+    QAbstractScrollArea,
     QApplication,
     QCheckBox,
     QComboBox,
@@ -35,23 +36,30 @@ from PySide6.QtWidgets import (
 )
 
 from .ai import AiEqualizerService, AiPresetResult
-from .autoeq_service import build_autoeq_preset
-from .audio import AudioDevice, AudioEngine, list_audio_devices
+from .autoeq_service import AutoEqOfficialUnavailable, build_autoeq_preset_result
+from .audio import AudioDevice, AudioEngine, list_audio_devices, refresh_audio_backend
 from .curves import DEVICE_CURVES_DIR, TARGET_CURVES_DIR, FrequencyCurve, ensure_curve_dirs, list_curves
 from .dsp import DEFAULT_SAMPLE_RATE, GRAPH_FREQS, preset_response_db
 from .models import FILTER_TYPES, EqFilter, Preset, flat_preset
 from .storage import PresetStore
 
 CURVE_COLORS = [
-    "#16c7b7",
     "#f2b84b",
-    "#7ddc63",
     "#5aa9ff",
     "#d984ff",
     "#ff8a4c",
+    "#7ddc63",
+    "#e85d75",
     "#9ad7ff",
+    "#c792ea",
+    "#ffcb6b",
+    "#82aaff",
+    "#f78c6c",
+    "#a6e22e",
+    "#c3e88d",
+    "#ff6f91",
 ]
-CURRENT_COLOR = "#ff3f6e"
+CURRENT_COLOR = "#05e5b6"
 NEW_PRESET_ID = "__new__"
 DEFAULT_WINDOW_WIDTH = 1480
 DEFAULT_WINDOW_HEIGHT = 900
@@ -95,22 +103,23 @@ class FilterEditorRow(QFrame):
         self.setObjectName("filterRow")
         self.setFrameShape(QFrame.Shape.StyledPanel)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setFixedWidth(450)
+        self.setFixedWidth(430)
         self.setMinimumHeight(122)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 
         layout = QGridLayout(self)
-        layout.setContentsMargins(10, 8, 10, 8)
-        layout.setHorizontalSpacing(5)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setHorizontalSpacing(4)
         layout.setVerticalSpacing(5)
 
         self.enabled_check = QCheckBox()
         self.enabled_check.setToolTip("Вкл")
+        self.enabled_check.setFixedWidth(24)
         self.enabled_check.setChecked(eq_filter.enabled)
         self.type_combo = QComboBox()
         self.type_combo.addItems(FILTER_TYPES)
         self.type_combo.setCurrentText(eq_filter.type)
-        self.type_combo.setFixedWidth(84)
+        self.type_combo.setFixedWidth(76)
 
         self.gain_dial = QDial()
         self.gain_dial.setRange(-2400, 2400)
@@ -134,7 +143,7 @@ class FilterEditorRow(QFrame):
         self.freq_spin.setSingleStep(10.0)
         self.freq_spin.setKeyboardTracking(False)
         self.freq_spin.setValue(eq_filter.freq)
-        self.freq_spin.setFixedWidth(82)
+        self.freq_spin.setFixedWidth(78)
 
         self.q_spin = QDoubleSpinBox()
         self.q_spin.setRange(0.1, 18.0)
@@ -142,7 +151,7 @@ class FilterEditorRow(QFrame):
         self.q_spin.setSingleStep(0.01)
         self.q_spin.setKeyboardTracking(False)
         self.q_spin.setValue(eq_filter.q)
-        self.q_spin.setFixedWidth(70)
+        self.q_spin.setFixedWidth(66)
 
         index_label = QLabel(f"{index + 1:02d}")
         index_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -304,11 +313,29 @@ class MainWindow(QMainWindow):
             self.main_splitter.restoreState(splitter_state)
         else:
             self.main_splitter.setSizes(list(DEFAULT_SPLITTER_SIZES))
+        self.clamp_window_to_available_screen()
+        self.settings.setValue("window/geometry", self.saveGeometry())
 
     def save_window_layout(self) -> None:
+        self.clamp_window_to_available_screen()
         self.settings.setValue("window/geometry", self.saveGeometry())
         self.settings.setValue("window/state", self.saveState())
         self.settings.setValue("window/main_splitter", self.main_splitter.saveState())
+
+    def clamp_window_to_available_screen(self) -> None:
+        screen = self.screen() or QApplication.primaryScreen()
+        if screen is None:
+            return
+        available = screen.availableGeometry()
+        frame = self.frameGeometry()
+        if frame.width() > available.width() or frame.height() > available.height():
+            self.resize(min(self.width(), available.width()), min(self.height(), available.height()))
+            frame = self.frameGeometry()
+
+        x = min(max(frame.x(), available.x()), available.right() - frame.width() + 1)
+        y = min(max(frame.y(), available.y()), available.bottom() - frame.height() + 1)
+        if x != frame.x() or y != frame.y():
+            self.move(x, y)
 
     def _build_top_bar(self) -> QWidget:
         panel = QWidget()
@@ -319,6 +346,8 @@ class MainWindow(QMainWindow):
 
         self.input_combo = QComboBox()
         self.output_combo = QComboBox()
+        self._configure_flexible_combo(self.input_combo, min_chars=24)
+        self._configure_flexible_combo(self.output_combo, min_chars=24)
         self.refresh_devices_button = QPushButton("Обновить")
         self.refresh_devices_button.clicked.connect(self.refresh_devices)
 
@@ -397,6 +426,7 @@ class MainWindow(QMainWindow):
         self.device_curve_combo.setMaxVisibleItems(12)
         self.device_curve_combo.currentIndexChanged.connect(self.on_device_curve_changed)
         self.current_selector = QComboBox()
+        self._configure_flexible_combo(self.current_selector, min_chars=18)
         self.current_selector.currentIndexChanged.connect(self.load_current_from_selector)
         self.compare_button = QPushButton("Сравнить")
         self.compare_button.setObjectName("compareButton")
@@ -430,17 +460,27 @@ class MainWindow(QMainWindow):
         layout.addLayout(controls)
         return box
 
+    def _configure_flexible_combo(self, combo: QComboBox, *, min_chars: int) -> None:
+        combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        combo.setMinimumContentsLength(min_chars)
+        combo.setMinimumWidth(0)
+        combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
     def _build_filters_section(self) -> QGroupBox:
         box = QGroupBox("Фильтры")
         layout = QVBoxLayout(box)
 
         self.filter_scroll = QScrollArea()
-        self.filter_scroll.setWidgetResizable(True)
+        self.filter_scroll.setWidgetResizable(False)
+        self.filter_scroll.setSizeAdjustPolicy(QAbstractScrollArea.SizeAdjustPolicy.AdjustIgnored)
         self.filter_scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.filter_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.filter_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.filter_scroll.setMinimumHeight(150)
+        self.filter_scroll.setMinimumWidth(0)
+        self.filter_scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.filter_container = QWidget()
+        self.filter_container.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self.filter_list_layout = QHBoxLayout(self.filter_container)
         self.filter_list_layout.setContentsMargins(0, 0, 0, 8)
         self.filter_list_layout.setSpacing(8)
@@ -560,7 +600,7 @@ class MainWindow(QMainWindow):
                 border: 1px solid #313640;
                 border-radius: 6px;
                 padding: 5px;
-                selection-background-color: #ff3f6e;
+                selection-background-color: #05e5b6;
             }
             QTabWidget::pane {
                 border: 0;
@@ -584,7 +624,7 @@ class MainWindow(QMainWindow):
                 border-radius: 8px;
             }
             QFrame#filterRow[selected="true"] {
-                border: 1px solid #ff3f6e;
+                border: 1px solid #05e5b6;
                 background: #1d2029;
             }
             QLabel#paramLabel {
@@ -622,9 +662,13 @@ class MainWindow(QMainWindow):
         )
 
     def refresh_devices(self) -> None:
+        previous_input = self.input_combo.currentData()
+        previous_output = self.output_combo.currentData()
         self.input_combo.clear()
         self.output_combo.clear()
         try:
+            if not self.audio_engine.is_running:
+                refresh_audio_backend()
             self.input_devices = list_audio_devices("input")
             self.output_devices = list_audio_devices("output")
         except Exception as exc:  # noqa: BLE001
@@ -637,8 +681,18 @@ class MainWindow(QMainWindow):
         for device in self.output_devices:
             self.output_combo.addItem(device.label, device.index)
 
+        self._restore_combo_data(self.input_combo, previous_input)
+        self._restore_combo_data(self.output_combo, previous_output)
+
         self.audio_button.setEnabled(bool(self.input_devices and self.output_devices))
         self.status_label.setText("Аудио остановлено")
+
+    def _restore_combo_data(self, combo: QComboBox, value: object) -> None:
+        if value is None:
+            return
+        index = combo.findData(value)
+        if index >= 0:
+            combo.setCurrentIndex(index)
 
     def refresh_curve_lists(self) -> None:
         previous_device = self.selected_device_curve.name if self.selected_device_curve is not None else "Default"
@@ -726,6 +780,7 @@ class MainWindow(QMainWindow):
         device_db = self.selected_device_response_db()
         self.device_curve_item.setData(GRAPH_FREQS, device_db)
         db = device_db + preset_response_db(self.current_preset, GRAPH_FREQS, DEFAULT_SAMPLE_RATE)
+        self.current_curve.setPen(pg.mkPen(CURRENT_COLOR, width=3))
         self.current_curve.setData(GRAPH_FREQS, db, name=self.current_preset.name)
 
         for curve in self.compare_curves.values():
@@ -758,10 +813,26 @@ class MainWindow(QMainWindow):
             self.selected_filter_row = min(max(self.selected_filter_row, 0), len(self.filter_rows) - 1)
         else:
             self.selected_filter_row = -1
-        row_width = 458
-        self.filter_container.setMinimumWidth(max(self.filter_scroll.viewport().width(), len(self.filter_rows) * row_width))
+        self.sync_filter_container_width()
         self.update_filter_selection()
         self._updating = False
+
+    def sync_filter_container_width(self) -> None:
+        if not hasattr(self, "filter_container"):
+            return
+        row_width = 430
+        spacing = self.filter_list_layout.spacing()
+        margins = self.filter_list_layout.contentsMargins()
+        row_count = len(self.filter_rows)
+        content_width = margins.left() + margins.right()
+        if row_count:
+            content_width += row_count * row_width + max(0, row_count - 1) * spacing
+        viewport_width = max(1, self.filter_scroll.viewport().width() - 2)
+        width = max(viewport_width, content_width)
+        height = max(self.filter_container.sizeHint().height(), self.filter_scroll.viewport().height())
+        self.filter_container.setMinimumWidth(0)
+        self.filter_container.setMaximumWidth(16777215)
+        self.filter_container.resize(width, height)
 
     def _add_filter_row(self, eq_filter: EqFilter, index: int) -> None:
         row = FilterEditorRow(eq_filter, index)
@@ -970,13 +1041,19 @@ class MainWindow(QMainWindow):
             self.show_toast("Выберите целевую кривую")
             return
         target_curve = self.target_curves[int(target_index)]
-        preset = build_autoeq_preset(self.selected_device_curve, target_curve)
+        try:
+            result = build_autoeq_preset_result(self.selected_device_curve, target_curve)
+        except AutoEqOfficialUnavailable as exc:
+            self.show_toast(f"AutoEQ недоступен: {exc}", timeout_ms=4200)
+            return
+        preset = result.preset
         saved = self.save_generated_preset(preset)
         self.current_preset = saved.clone(keep_id=True)
         self.populate_filter_editor()
         self.refresh_presets()
         self.apply_audio_preset()
-        self.show_toast(f"AutoEQ применен: {saved.name}")
+        suffix = "official" if result.backend == "official" else "local"
+        self.show_toast(f"AutoEQ применен ({suffix}): {saved.name}")
 
     def toggle_audio(self) -> None:
         if self.audio_engine.is_running:
@@ -1031,6 +1108,7 @@ class MainWindow(QMainWindow):
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
+        self.sync_filter_container_width()
         self._position_toast()
 
     def send_chat(self) -> None:

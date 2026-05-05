@@ -30,6 +30,16 @@ def _sounddevice() -> Any:
     return sd
 
 
+def refresh_audio_backend() -> None:
+    sd = _sounddevice()
+    terminate = getattr(sd, "_terminate", None)
+    initialize = getattr(sd, "_initialize", None)
+    if not callable(terminate) or not callable(initialize):
+        return
+    terminate()
+    initialize()
+
+
 def list_audio_devices(kind: str) -> list[AudioDevice]:
     sd = _sounddevice()
     devices = sd.query_devices()

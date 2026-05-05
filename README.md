@@ -1,93 +1,92 @@
 # AIEQ
 
-AIEQ - прототип параметрического эквалайзера под Windows на Python.
+AIEQ - Windows-прототип параметрического эквалайзера на Python/PySide6 с real-time обработкой через `sounddevice` и VB-Cable.
 
-Возможности:
+## Возможности
 
-- отображение текущей АЧХ и сохраненных пресетов разными цветами;
-- параметрические фильтры `peaking`, `low_shelf`, `high_shelf`, `low_pass`, `high_pass`, `band_pass`, `notch`;
-- огибающий режим сведения полос: пересекающиеся фильтры не каскадируются, итоговая АЧХ выбирает самое выраженное отклонение в каждой точке;
-- импорт и экспорт пресетов в JSON;
-- SQLite-память пресетов для быстрого сравнения;
-- выбор входного и выходного аудиоустройства с подписью аудио-подсистемы в квадратных скобках;
-- real-time обработка через `sounddevice` и VB-Cable;
-- AI-чат через локальную Ollama или OpenAI, который превращает пожелание по звуку в новый пресет, сохраняет его, применяет и показывает на графике.
-- сохранение размеров окна и ширины секции AI-чата между запусками.
-- загрузка АЧХ устройств из `curves/devices/*.txt` и целевых кривых AutoEQ из `curves/targets/*.txt`.
+- график АЧХ с текущим пресетом, сохраненными пресетами для сравнения и АЧХ выбранного устройства;
+- фильтры `peaking`, `low_shelf`, `high_shelf`, `low_pass`, `high_pass`, `band_pass`, `notch`;
+- огибающий режим сведения полос: пересекающиеся фильтры не суммируются каскадом;
+- импорт/экспорт JSON-пресетов и SQLite-хранилище пресетов в `%APPDATA%\AIEQ`;
+- AI-чат через локальную GGUF-модель и `llama-cpp-python`;
+- вкладка AutoEQ с официальным backend пакета `autoeq` на Python 3.11 и локальным fallback.
 
-## Установка
+## Установка среды
+
+Официальный AutoEq 4.1.2 требует Python `>=3.8,<3.12`, поэтому проект синхронизируется на Python 3.11:
 
 ```powershell
-py -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -e .[dev]
-```
-
-Скопируйте `.env.example` в `.env` и настройте AI-провайдер:
-
-```powershell
+uv sync --python 3.11 --extra dev --extra autoeq --extra build --extra ai
 Copy-Item .env.example .env
 ```
 
-Для бесплатного локального режима с Ollama:
+В проекте задан prebuilt CPU wheel index для `llama-cpp-python`, поэтому Visual Studio Build Tools для обычной CPU-установки не нужны.
 
-```ini
-AIEQ_AI_PROVIDER=ollama
-OLLAMA_BASE_URL=http://127.0.0.1:11434
-OLLAMA_MODEL=llama3.1:8b
-OLLAMA_TIMEOUT=300
+## Модель
+
+Рекомендуемый CPU-вариант: `Qwen/Qwen2.5-3B-Instruct-GGUF`, файл `qwen2.5-3b-instruct-q4_k_m.gguf`.
+
+1. Создайте папку `models`, если ее нет.
+2. Скачайте `qwen2.5-3b-instruct-q4_k_m.gguf` со страницы Hugging Face `Qwen/Qwen2.5-3B-Instruct-GGUF`.
+3. Положите файл сюда:
+
+```text
+models/qwen2.5-3b-instruct-q4_k_m.gguf
 ```
 
-Если `OLLAMA_MODEL` оставить пустым, приложение попробует взять первую установленную модель из Ollama. Если AI-модель не подключена, чат покажет системное сообщение: `Ваш ИИ-агент не подключен`.
-
-Для OpenAI-режима:
+4. Проверьте `.env`:
 
 ```ini
-AIEQ_AI_PROVIDER=openai
-OPENAI_API_KEY=sk-...
-AIEQ_OPENAI_MODEL=gpt-5.2
+AIEQ_AI_PROVIDER=llama_cpp
+AIEQ_LLAMA_MODEL_PATH=models/qwen2.5-3b-instruct-q4_k_m.gguf
+AIEQ_LLAMA_N_CTX=4096
+AIEQ_LLAMA_N_THREADS=7
+AIEQ_LLAMA_N_GPU_LAYERS=0
+AIEQ_AUTOEQ_BACKEND=auto
 ```
 
-## Запуск
+Если модель не подключена, чат покажет: `Ваш ИИ-агент не подключен`.
+
+## Запуск из исходников
 
 ```powershell
-python -m aieq
+uv run python -m source
 ```
 
 Типичный сценарий с VB-Cable:
 
-1. В Windows выберите `CABLE Input` как системный выход.
+1. В Windows выберите `CABLE Input` как системный вывод.
 2. В AIEQ выберите вход `CABLE Output`.
 3. В AIEQ выберите реальные наушники/колонки как выход.
 4. Нажмите `Старт`.
 
-## Пресет JSON
+## AutoEQ
 
-```json
-{
-  "version": 1,
-  "name": "Example",
-  "filters": [
-    { "type": "low_shelf", "freq": 90, "q": 0.7, "gain": 3.0 },
-    { "type": "peaking", "freq": 350, "q": 1.1, "gain": -2.0 }
-  ]
-}
+По умолчанию `AIEQ_AUTOEQ_BACKEND=auto`: приложение использует официальный пакет `autoeq`, если он доступен, и переключается на локальный fallback только если официальный backend недоступен.
+
+Для строгой проверки официального backend:
+
+```ini
+AIEQ_AUTOEQ_BACKEND=official
 ```
 
-## Кривые устройств и AutoEQ
+## Сборка и запуск EXE
 
-Формат `.txt` для устройств и целевых кривых: две колонки `frequency value`.
+```powershell
+.\scripts\build_exe.ps1
+```
 
-- `curves/devices` - АЧХ устройств. В списке всегда есть встроенное устройство `Default` с линией `0 dB`.
-- `curves/targets` - целевые кривые для вкладки `AutoEQ`.
+Результат:
 
-Значения нормализуются по `1 kHz`. Вкладка `AutoEQ` строит параметрический пресет из выбранного устройства и целевой кривой и сохраняет его как новый текущий пресет.
+```text
+dist\AIEQ\AIEQ.exe
+```
 
-AutoEq upstream: https://github.com/jaakkopasanen/AutoEq
+Для запуска откройте `dist\AIEQ\AIEQ.exe`. GGUF-модель не вшивается в exe; положите папку `models` рядом с exe или оставьте путь к модели в `.env` относительно рабочей папки запуска.
 
 ## Проверки
 
 ```powershell
-pytest
-python -m compileall aieq
+.\.venv\Scripts\python.exe -m pytest -p no:cacheprovider
+.\.venv\Scripts\python.exe -m compileall source
 ```
