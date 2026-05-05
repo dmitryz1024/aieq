@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from aieq.models import EqFilter, Preset
-from aieq.storage import PresetStore
+from source.models import EqFilter, Preset
+from source.storage import PresetStore
 
 
 def test_preset_store_can_find_by_name_case_insensitive(tmp_path) -> None:

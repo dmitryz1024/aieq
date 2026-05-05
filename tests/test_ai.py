@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from aieq.ai import AiEqualizerService
-from aieq.models import flat_preset
+from source.ai import AiEqualizerService
+from source.models import flat_preset
 
 
 def test_ai_provider_none_does_not_create_fallback_preset(monkeypatch) -> None:

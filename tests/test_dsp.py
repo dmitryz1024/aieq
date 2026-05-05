@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import numpy as np
 
-from aieq.dsp import GRAPH_FREQS, design_fir_from_preset, envelope_response_db, filter_response_db
-from aieq.models import EqFilter, Preset
-from aieq.audio import AudioEngine
-from aieq.curves import FrequencyCurve
-from aieq.autoeq_service import build_autoeq_preset
+from source.dsp import GRAPH_FREQS, design_fir_from_preset, envelope_response_db, filter_response_db
+from source.models import EqFilter, Preset
+from source.audio import AudioEngine
+from source.curves import FrequencyCurve
+from source.autoeq_service import build_autoeq_preset
 
 
 def test_zero_gain_peaking_is_flat() -> None:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from aieq.curves import load_curve_file
+from source.curves import load_curve_file
 
 
 def test_curve_file_is_normalized_at_1khz(tmp_path) -> None:
