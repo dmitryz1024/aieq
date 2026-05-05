@@ -1,12 +1,19 @@
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 
 
-CURVES_DIR = Path("curves")
+def app_root() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent
+
+
+CURVES_DIR = app_root() / "curves"
 DEVICE_CURVES_DIR = CURVES_DIR / "devices"
 TARGET_CURVES_DIR = CURVES_DIR / "targets"
 
@@ -46,12 +53,12 @@ def load_curve_file(path: Path) -> FrequencyCurve:
         line = raw_line.strip()
         if not line or line.startswith("#"):
             continue
-        parts = line.replace(",", ".").replace(";", " ").split()
+        parts = _split_curve_line(line)
         if len(parts) < 2:
             continue
         try:
-            freq = float(parts[0])
-            value = float(parts[1])
+            freq = float(parts[0].replace(",", "."))
+            value = float(parts[1].replace(",", "."))
         except ValueError:
             continue
         if freq > 0:
@@ -65,6 +72,14 @@ def load_curve_file(path: Path) -> FrequencyCurve:
     return FrequencyCurve(path.stem, sorted_freqs, sorted_values, path).normalized()
 
 
+def _split_curve_line(line: str) -> list[str]:
+    if ";" in line:
+        return [part.strip() for part in line.split(";")]
+    if "," in line and not any(char.isspace() for char in line):
+        return [part.strip() for part in line.split(",")]
+    return line.split()
+
+
 def list_curves(folder: Path, *, include_default: bool = False) -> list[FrequencyCurve]:
     ensure_curve_dirs()
     curves = [default_device_curve()] if include_default else []
@@ -74,4 +89,3 @@ def list_curves(folder: Path, *, include_default: bool = False) -> list[Frequenc
         except ValueError:
             continue
     return curves
-

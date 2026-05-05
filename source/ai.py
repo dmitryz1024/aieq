@@ -304,6 +304,16 @@ class AiEqualizerService:
             raise ValueError("AI response is not a JSON object")
         return data
 
+    def clear_context(self) -> None:
+        if self._llama is None:
+            return
+        reset = getattr(self._llama, "reset", None)
+        if callable(reset):
+            try:
+                reset()
+            except Exception:  # noqa: BLE001 - context clearing is best effort.
+                return
+
     def _serialize_saved_presets(self, presets: list[Preset] | None) -> list[dict[str, Any]]:
         if not presets:
             return []
