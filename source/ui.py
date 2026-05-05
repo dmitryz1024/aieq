@@ -5,7 +5,7 @@ from pathlib import Path
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import QObject, QSettings, Qt, QThread, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, QSettings, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QAbstractScrollArea,
@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .ai import AiEqualizerService, AiPresetResult
+from .ai import AiEqualizerService, AiPresetResult, list_local_models
 from .autoeq_service import AutoEqOfficialUnavailable, build_autoeq_preset_result
 from .audio import AudioDevice, AudioEngine, list_audio_devices, refresh_audio_backend
 from .curves import DEVICE_CURVES_DIR, TARGET_CURVES_DIR, FrequencyCurve, ensure_curve_dirs, list_curves
@@ -60,6 +60,8 @@ CURVE_COLORS = [
     "#ff6f91",
 ]
 CURRENT_COLOR = "#05e5b6"
+TARGET_COLOR = "#D44444"
+USER_CHAT_COLOR = "#D44444"
 NEW_PRESET_ID = "__new__"
 DEFAULT_WINDOW_WIDTH = 1480
 DEFAULT_WINDOW_HEIGHT = 900
@@ -82,19 +84,37 @@ class FrequencyAxisItem(pg.AxisItem):
 class AiWorker(QObject):
     finished = Signal(object)
 
-    def __init__(self, service: AiEqualizerService, text: str, preset: Preset) -> None:
+    def __init__(
+        self,
+        service: AiEqualizerService,
+        text: str,
+        preset: Preset,
+        *,
+        saved_presets: list[Preset],
+        model_path: Path | None,
+    ) -> None:
         super().__init__()
         self.service = service
         self.text = text
         self.preset = preset
+        self.saved_presets = saved_presets
+        self.model_path = model_path
 
     def run(self) -> None:
-        self.finished.emit(self.service.suggest_preset(self.text, self.preset))
+        self.finished.emit(
+            self.service.suggest_preset(
+                self.text,
+                self.preset,
+                saved_presets=self.saved_presets,
+                model_path=self.model_path,
+            )
+        )
 
 
 class FilterEditorRow(QFrame):
     changed = Signal()
     selected = Signal(object)
+    FIXED_WIDTH = 430
 
     def __init__(self, eq_filter: EqFilter, index: int) -> None:
         super().__init__()
@@ -103,7 +123,7 @@ class FilterEditorRow(QFrame):
         self.setObjectName("filterRow")
         self.setFrameShape(QFrame.Shape.StyledPanel)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setFixedWidth(430)
+        self.setFixedWidth(self.FIXED_WIDTH)
         self.setMinimumHeight(122)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 
@@ -257,11 +277,13 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._apply_style()
         self.refresh_devices()
+        self.refresh_ai_models()
         self.refresh_curve_lists()
         self.refresh_presets()
         self.populate_filter_editor()
         self.update_graph()
         self.restore_window_layout()
+        self.schedule_filter_container_sync()
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
         if self._ai_thread is not None and self._ai_thread.isRunning():
@@ -402,7 +424,7 @@ class MainWindow(QMainWindow):
             minYRange=40.0,
             maxYRange=40.0,
         )
-        self.plot.addLegend(offset=(12, 12))
+        self.plot_legend = self.plot.addLegend(offset=(12, 12))
         self.device_curve_item = self.plot.plot(
             GRAPH_FREQS,
             np.zeros_like(GRAPH_FREQS),
@@ -410,6 +432,14 @@ class MainWindow(QMainWindow):
             name="Устройство",
         )
         self.device_curve_item.setZValue(-10)
+        self.target_curve_item = self.plot.plot(
+            GRAPH_FREQS,
+            np.zeros_like(GRAPH_FREQS),
+            pen=pg.mkPen(TARGET_COLOR, width=2),
+        )
+        self.target_curve_item.setZValue(-6)
+        self.target_curve_item.hide()
+        self.target_legend_visible = False
         self.current_curve = self.plot.plot(
             GRAPH_FREQS,
             np.zeros_like(GRAPH_FREQS),
@@ -471,19 +501,27 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(box)
 
         self.filter_scroll = QScrollArea()
+        self.filter_scroll.setObjectName("filterScroll")
         self.filter_scroll.setWidgetResizable(False)
         self.filter_scroll.setSizeAdjustPolicy(QAbstractScrollArea.SizeAdjustPolicy.AdjustIgnored)
         self.filter_scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.filter_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.filter_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.filter_scroll.setMinimumHeight(150)
+        self.filter_scroll.setMinimumHeight(164)
         self.filter_scroll.setMinimumWidth(0)
         self.filter_scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.filter_scroll.viewport().setObjectName("filterViewport")
+        self.filter_scroll.viewport().setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.filter_scroll.viewport().installEventFilter(self)
+        self.filter_scroll.horizontalScrollBar().rangeChanged.connect(self.schedule_filter_container_sync)
         self.filter_container = QWidget()
+        self.filter_container.setObjectName("filterContainer")
+        self.filter_container.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.filter_container.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self.filter_list_layout = QHBoxLayout(self.filter_container)
-        self.filter_list_layout.setContentsMargins(0, 0, 0, 8)
+        self.filter_list_layout.setContentsMargins(0, 0, 0, 14)
         self.filter_list_layout.setSpacing(8)
+        self.filter_list_layout.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         self.filter_list_layout.addStretch(1)
         self.filter_scroll.setWidget(self.filter_container)
         layout.addWidget(self.filter_scroll, 1)
@@ -517,6 +555,15 @@ class MainWindow(QMainWindow):
         ai_layout = QVBoxLayout(ai_tab)
         ai_layout.setContentsMargins(0, 0, 0, 0)
         ai_layout.setSpacing(8)
+        model_controls = QHBoxLayout()
+        model_controls.addWidget(QLabel("Модель"))
+        self.ai_model_combo = QComboBox()
+        self.ai_model_combo.setMaxVisibleItems(12)
+        self._configure_flexible_combo(self.ai_model_combo, min_chars=18)
+        model_controls.addWidget(self.ai_model_combo, 1)
+        self.refresh_models_button = QPushButton("Обновить")
+        self.refresh_models_button.clicked.connect(self.refresh_ai_models)
+        model_controls.addWidget(self.refresh_models_button)
         self.chat_history = QTextBrowser()
         self.chat_history.setOpenExternalLinks(True)
         self.chat_input = QTextEdit()
@@ -524,9 +571,15 @@ class MainWindow(QMainWindow):
         self.chat_input.setFixedHeight(96)
         self.send_button = QPushButton("Отправить")
         self.send_button.clicked.connect(self.send_chat)
+        self.clear_chat_button = QPushButton("Очистить")
+        self.clear_chat_button.clicked.connect(self.clear_chat)
+        chat_buttons = QHBoxLayout()
+        chat_buttons.addWidget(self.send_button, 1)
+        chat_buttons.addWidget(self.clear_chat_button)
+        ai_layout.addLayout(model_controls)
         ai_layout.addWidget(self.chat_history, 1)
         ai_layout.addWidget(self.chat_input)
-        ai_layout.addWidget(self.send_button)
+        ai_layout.addLayout(chat_buttons)
         self.append_chat("AIEQ", "Опиши, что хочется изменить в звуке. Я сохраню ответ как новый пресет и применю его.")
 
         autoeq_tab = QWidget()
@@ -536,7 +589,16 @@ class MainWindow(QMainWindow):
         autoeq_layout.addWidget(QLabel("Целевая кривая"))
         self.target_curve_combo = QComboBox()
         self.target_curve_combo.setMaxVisibleItems(12)
+        self.target_curve_combo.currentIndexChanged.connect(self.on_target_curve_changed)
         autoeq_layout.addWidget(self.target_curve_combo)
+        self.show_target_checkbox = QCheckBox("Показывать target")
+        self.show_target_checkbox.toggled.connect(lambda _checked: self.update_graph())
+        autoeq_layout.addWidget(self.show_target_checkbox)
+        autoeq_layout.addWidget(QLabel("Алгоритм"))
+        self.autoeq_backend_combo = QComboBox()
+        self.autoeq_backend_combo.addItem("Local", "local")
+        self.autoeq_backend_combo.addItem("Official", "official")
+        autoeq_layout.addWidget(self.autoeq_backend_combo)
         self.refresh_curves_button = QPushButton("Обновить списки")
         self.refresh_curves_button.clicked.connect(self.refresh_curve_lists)
         autoeq_layout.addWidget(self.refresh_curves_button)
@@ -602,6 +664,16 @@ class MainWindow(QMainWindow):
                 padding: 5px;
                 selection-background-color: #05e5b6;
             }
+            QScrollArea#filterScroll {
+                background: #181a1f;
+                border: 1px solid #313640;
+                border-radius: 6px;
+                padding: 0;
+            }
+            QWidget#filterViewport,
+            QWidget#filterContainer {
+                background: #181a1f;
+            }
             QTabWidget::pane {
                 border: 0;
             }
@@ -662,6 +734,10 @@ class MainWindow(QMainWindow):
         )
 
     def refresh_devices(self) -> None:
+        if self.audio_engine.is_running:
+            self.refresh_devices_button.setEnabled(False)
+            return
+        self.refresh_devices_button.setEnabled(True)
         previous_input = self.input_combo.currentData()
         previous_output = self.output_combo.currentData()
         self.input_combo.clear()
@@ -674,6 +750,7 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001
             self.status_label.setText(f"sounddevice недоступен: {exc}")
             self.audio_button.setEnabled(False)
+            self.refresh_devices_button.setEnabled(True)
             return
 
         for device in self.input_devices:
@@ -685,6 +762,7 @@ class MainWindow(QMainWindow):
         self._restore_combo_data(self.output_combo, previous_output)
 
         self.audio_button.setEnabled(bool(self.input_devices and self.output_devices))
+        self.refresh_devices_button.setEnabled(True)
         self.status_label.setText("Аудио остановлено")
 
     def _restore_combo_data(self, combo: QComboBox, value: object) -> None:
@@ -693,6 +771,38 @@ class MainWindow(QMainWindow):
         index = combo.findData(value)
         if index >= 0:
             combo.setCurrentIndex(index)
+
+    def refresh_ai_models(self) -> None:
+        if not hasattr(self, "ai_model_combo"):
+            return
+        previous = self.ai_model_combo.currentData()
+        default_path = str(self.ai_service.llama_model_path)
+        self.ai_model_combo.blockSignals(True)
+        self.ai_model_combo.clear()
+        models = list_local_models()
+        if not models:
+            self.ai_model_combo.addItem("Модели не найдены", None)
+            self.ai_model_combo.setEnabled(False)
+            self.ai_model_combo.blockSignals(False)
+            return
+        self.ai_model_combo.setEnabled(True)
+        selected_index = 0
+        wanted = str(previous) if previous else default_path
+        for index, model_path in enumerate(models):
+            resolved = str(model_path)
+            self.ai_model_combo.addItem(model_path.name, resolved)
+            if resolved == wanted or str(model_path.resolve()) == wanted:
+                selected_index = index
+        self.ai_model_combo.setCurrentIndex(selected_index)
+        self.ai_model_combo.blockSignals(False)
+
+    def selected_ai_model_path(self) -> Path | None:
+        if not hasattr(self, "ai_model_combo"):
+            return None
+        value = self.ai_model_combo.currentData()
+        if not value:
+            return None
+        return Path(str(value))
 
     def refresh_curve_lists(self) -> None:
         previous_device = self.selected_device_curve.name if self.selected_device_curve is not None else "Default"
@@ -714,10 +824,13 @@ class MainWindow(QMainWindow):
 
         self.target_curve_combo.blockSignals(True)
         self.target_curve_combo.clear()
+        target_index = 0
         for index, curve in enumerate(self.target_curves):
             self.target_curve_combo.addItem(curve.name, index)
             if curve.name == previous_target:
-                self.target_curve_combo.setCurrentIndex(index)
+                target_index = index
+        if self.target_curves:
+            self.target_curve_combo.setCurrentIndex(target_index)
         self.target_curve_combo.blockSignals(False)
         self.run_autoeq_button.setEnabled(bool(self.target_curves))
         self.update_graph()
@@ -727,10 +840,21 @@ class MainWindow(QMainWindow):
             self.selected_device_curve = self.device_curves[index]
             self.update_graph()
 
+    def on_target_curve_changed(self, _index: int) -> None:
+        self.update_graph()
+
     def selected_device_response_db(self) -> np.ndarray:
         if self.selected_device_curve is None:
             return np.zeros_like(GRAPH_FREQS, dtype=np.float64)
         return self.selected_device_curve.response_db(GRAPH_FREQS)
+
+    def selected_target_response_db(self) -> np.ndarray | None:
+        if not hasattr(self, "target_curve_combo"):
+            return None
+        target_index = self.target_curve_combo.currentData()
+        if target_index is None or not (0 <= int(target_index) < len(self.target_curves)):
+            return None
+        return self.target_curves[int(target_index)].response_db(GRAPH_FREQS)
 
     def refresh_presets(self) -> None:
         self.saved_presets = self.store.list_presets()
@@ -779,6 +903,20 @@ class MainWindow(QMainWindow):
     def update_graph(self) -> None:
         device_db = self.selected_device_response_db()
         self.device_curve_item.setData(GRAPH_FREQS, device_db)
+        target_db = self.selected_target_response_db()
+        show_target = (
+            target_db is not None
+            and hasattr(self, "show_target_checkbox")
+            and self.show_target_checkbox.isChecked()
+        )
+        if show_target and target_db is not None:
+            self.target_curve_item.setData(GRAPH_FREQS, target_db)
+            self.target_curve_item.setPen(pg.mkPen(TARGET_COLOR, width=2))
+            self.target_curve_item.show()
+            self.set_target_legend_visible(True)
+        else:
+            self.target_curve_item.hide()
+            self.set_target_legend_visible(False)
         db = device_db + preset_response_db(self.current_preset, GRAPH_FREQS, DEFAULT_SAMPLE_RATE)
         self.current_curve.setPen(pg.mkPen(CURRENT_COLOR, width=3))
         self.current_curve.setData(GRAPH_FREQS, db, name=self.current_preset.name)
@@ -799,6 +937,17 @@ class MainWindow(QMainWindow):
             )
             self.compare_curves[preset.id] = curve
 
+    def set_target_legend_visible(self, visible: bool) -> None:
+        if not hasattr(self, "plot_legend"):
+            return
+        if visible == self.target_legend_visible:
+            return
+        if visible:
+            self.plot_legend.addItem(self.target_curve_item, "Target")
+        else:
+            self.plot_legend.removeItem("Target")
+        self.target_legend_visible = visible
+
     def populate_filter_editor(self) -> None:
         self._updating = True
         while self.filter_list_layout.count() > 1:
@@ -813,14 +962,22 @@ class MainWindow(QMainWindow):
             self.selected_filter_row = min(max(self.selected_filter_row, 0), len(self.filter_rows) - 1)
         else:
             self.selected_filter_row = -1
+        self.filter_scroll.horizontalScrollBar().setValue(0)
         self.sync_filter_container_width()
         self.update_filter_selection()
+        self.schedule_filter_container_sync()
         self._updating = False
+
+    def schedule_filter_container_sync(self, *_args: object) -> None:
+        if not hasattr(self, "filter_container"):
+            return
+        QTimer.singleShot(0, self.sync_filter_container_width)
+        QTimer.singleShot(35, self.sync_filter_container_width)
 
     def sync_filter_container_width(self) -> None:
         if not hasattr(self, "filter_container"):
             return
-        row_width = 430
+        row_width = FilterEditorRow.FIXED_WIDTH
         spacing = self.filter_list_layout.spacing()
         margins = self.filter_list_layout.contentsMargins()
         row_count = len(self.filter_rows)
@@ -830,16 +987,24 @@ class MainWindow(QMainWindow):
         viewport_width = max(1, self.filter_scroll.viewport().width() - 2)
         width = max(viewport_width, content_width)
         height = max(self.filter_container.sizeHint().height(), self.filter_scroll.viewport().height())
-        self.filter_container.setMinimumWidth(0)
-        self.filter_container.setMaximumWidth(16777215)
-        self.filter_container.resize(width, height)
+        self.filter_container.setMinimumSize(0, 0)
+        self.filter_container.setMaximumSize(16777215, 16777215)
+        self.filter_container.setFixedSize(width, height)
+        self.filter_container.updateGeometry()
+        self.filter_container.update()
+        self.filter_scroll.viewport().update()
 
     def _add_filter_row(self, eq_filter: EqFilter, index: int) -> None:
         row = FilterEditorRow(eq_filter, index)
         row.changed.connect(self.on_filters_changed)
         row.selected.connect(self.select_filter_row)
         self.filter_rows.append(row)
-        self.filter_list_layout.insertWidget(self.filter_list_layout.count() - 1, row)
+        self.filter_list_layout.insertWidget(
+            self.filter_list_layout.count() - 1,
+            row,
+            0,
+            Qt.AlignmentFlag.AlignTop,
+        )
 
     def select_filter_row(self, row: FilterEditorRow) -> None:
         if row in self.filter_rows:
@@ -991,7 +1156,7 @@ class MainWindow(QMainWindow):
             saved = self.store.save_new(self.current_preset, name=name)
         self.current_preset = saved.clone(keep_id=True)
         self.refresh_presets()
-        self.show_toast(f"Пресет сохранен: {saved.name}")
+        self.show_toast("Пресет сохранен")
         return True
 
     def next_available_preset_name(self, name: str) -> str:
@@ -1041,25 +1206,27 @@ class MainWindow(QMainWindow):
             self.show_toast("Выберите целевую кривую")
             return
         target_curve = self.target_curves[int(target_index)]
+        backend = str(self.autoeq_backend_combo.currentData() or "local")
         try:
-            result = build_autoeq_preset_result(self.selected_device_curve, target_curve)
-        except AutoEqOfficialUnavailable as exc:
-            self.show_toast(f"AutoEQ недоступен: {exc}", timeout_ms=4200)
+            result = build_autoeq_preset_result(self.selected_device_curve, target_curve, backend=backend)
+        except AutoEqOfficialUnavailable:
+            self.show_toast("AutoEQ недоступен", timeout_ms=4200)
             return
         preset = result.preset
         saved = self.save_generated_preset(preset)
         self.current_preset = saved.clone(keep_id=True)
+        self.show_target_checkbox.setChecked(True)
         self.populate_filter_editor()
         self.refresh_presets()
         self.apply_audio_preset()
-        suffix = "official" if result.backend == "official" else "local"
-        self.show_toast(f"AutoEQ применен ({suffix}): {saved.name}")
+        self.show_toast("AutoEQ применен")
 
     def toggle_audio(self) -> None:
         if self.audio_engine.is_running:
             self.audio_engine.stop()
             self.audio_button.setText("Старт")
             self.status_label.setText("Аудио остановлено")
+            self.refresh_devices_button.setEnabled(True)
             return
 
         input_device = self._selected_device(self.input_combo, self.input_devices)
@@ -1071,8 +1238,10 @@ class MainWindow(QMainWindow):
             self.audio_engine.start(input_device, output_device, self.current_preset)
             self.audio_button.setText("Стоп")
             self.status_label.setText(f"{int(self.audio_engine.sample_rate)} Hz, block {self.audio_engine.block_size}")
+            self.refresh_devices_button.setEnabled(False)
         except Exception as exc:  # noqa: BLE001
             self.audio_engine.stop()
+            self.refresh_devices_button.setEnabled(True)
             QMessageBox.critical(self, "Аудио", f"Не удалось запустить поток:\n{exc}")
 
     def _selected_device(self, combo: QComboBox, devices: list[AudioDevice]) -> AudioDevice | None:
@@ -1084,14 +1253,20 @@ class MainWindow(QMainWindow):
 
     def append_chat(self, author: str, text: str) -> None:
         safe = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\n", "<br>")
-        color = CURRENT_COLOR if author != "Вы" else "#16c7b7"
+        color = CURRENT_COLOR if author != "Вы" else USER_CHAT_COLOR
         self.chat_history.append(f'<p><b style="color:{color}">{author}</b><br>{safe}</p>')
+
+    def clear_chat(self) -> None:
+        self.chat_history.clear()
 
     def show_toast(self, text: str, timeout_ms: int = 2200) -> None:
         self.toast_label.setText(text)
+        self.toast_label.setMinimumWidth(0)
+        self.toast_label.setMaximumWidth(16777215)
         self.toast_label.adjustSize()
-        width = min(max(self.toast_label.width(), 180), max(180, self.width() - 80))
+        width = min(max(self.toast_label.sizeHint().width(), 180), max(180, self.width() - 80))
         self.toast_label.setFixedWidth(width)
+        self.toast_label.adjustSize()
         self._position_toast()
         self.toast_label.show()
         self.toast_timer.start(timeout_ms)
@@ -1102,13 +1277,26 @@ class MainWindow(QMainWindow):
     def _position_toast(self) -> None:
         if not hasattr(self, "toast_label"):
             return
-        x = max(20, self.width() - self.toast_label.width() - 28)
-        y = max(20, self.height() - self.toast_label.height() - 28)
+        central = self.centralWidget()
+        width = central.width() if central is not None else self.width()
+        x = max(20, (width - self.toast_label.width()) // 2)
+        top = self.main_splitter.geometry().top() if hasattr(self, "main_splitter") else 20
+        y = max(14, top + 4)
         self.toast_label.move(x, y)
+
+    def eventFilter(self, obj, event) -> bool:  # type: ignore[override]
+        if (
+            hasattr(self, "filter_scroll")
+            and obj is self.filter_scroll.viewport()
+            and event.type() in {QEvent.Type.Resize, QEvent.Type.Show}
+        ):
+            self.schedule_filter_container_sync()
+        return super().eventFilter(obj, event)
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
         self.sync_filter_container_width()
+        self.schedule_filter_container_sync()
         self._position_toast()
 
     def send_chat(self) -> None:
@@ -1125,7 +1313,13 @@ class MainWindow(QMainWindow):
         self.show_toast("ИИ-агент думает")
 
         self._ai_thread = QThread(self)
-        self._ai_worker = AiWorker(self.ai_service, text, self.current_preset.clone(keep_id=True))
+        self._ai_worker = AiWorker(
+            self.ai_service,
+            text,
+            self.current_preset.clone(keep_id=True),
+            saved_presets=[preset.clone(keep_id=True) for preset in self.saved_presets],
+            model_path=self.selected_ai_model_path(),
+        )
         self._ai_worker.moveToThread(self._ai_thread)
         self._ai_thread.started.connect(self._ai_worker.run)
         self._ai_worker.finished.connect(self.on_ai_finished)
@@ -1146,7 +1340,7 @@ class MainWindow(QMainWindow):
         self.populate_filter_editor()
         self.refresh_presets()
         self.append_chat("AIEQ", result.assistant_message)
-        self.show_toast(f"Применен пресет: {saved.name}")
+        self.show_toast("Пресет применен")
         self.send_button.setEnabled(True)
         self.send_button.setText("Отправить")
         self.apply_audio_preset()

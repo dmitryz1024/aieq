@@ -59,3 +59,12 @@ def test_autoeq_local_backend_can_be_forced(monkeypatch) -> None:
     result = build_autoeq_preset_result(device, target, max_filters=5)
     assert result.backend == "local"
     assert result.preset.name.startswith("AutoEQ")
+
+
+def test_autoeq_backend_argument_overrides_env(monkeypatch) -> None:
+    monkeypatch.setenv("AIEQ_AUTOEQ_BACKEND", "official")
+    freqs = np.geomspace(20, 20000, 128)
+    device = FrequencyCurve("Device", freqs, np.sin(np.linspace(0, 4, 128)) * 3)
+    target = FrequencyCurve("Target", freqs, np.zeros_like(freqs))
+    result = build_autoeq_preset_result(device, target, max_filters=5, backend="local")
+    assert result.backend == "local"

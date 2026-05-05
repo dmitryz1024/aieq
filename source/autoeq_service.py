@@ -52,8 +52,9 @@ def build_autoeq_preset_result(
     target_curve: FrequencyCurve,
     *,
     max_filters: int = 8,
+    backend: str | None = None,
 ) -> AutoEqPresetResult:
-    backend = os.environ.get("AIEQ_AUTOEQ_BACKEND", "auto").strip().lower() or "auto"
+    backend = (backend or os.environ.get("AIEQ_AUTOEQ_BACKEND", "auto")).strip().lower() or "auto"
     if backend in {"auto", "official"}:
         try:
             return AutoEqPresetResult(
@@ -76,8 +77,14 @@ def build_autoeq_preset_result(
     )
 
 
-def build_autoeq_preset(device_curve: FrequencyCurve, target_curve: FrequencyCurve, *, max_filters: int = 8) -> Preset:
-    return build_autoeq_preset_result(device_curve, target_curve, max_filters=max_filters).preset
+def build_autoeq_preset(
+    device_curve: FrequencyCurve,
+    target_curve: FrequencyCurve,
+    *,
+    max_filters: int = 8,
+    backend: str | None = None,
+) -> Preset:
+    return build_autoeq_preset_result(device_curve, target_curve, max_filters=max_filters, backend=backend).preset
 
 
 def _build_official_autoeq_preset(device_curve: FrequencyCurve, target_curve: FrequencyCurve) -> Preset:
@@ -105,13 +112,12 @@ def _build_official_autoeq_preset(device_curve: FrequencyCurve, target_curve: Fr
         frequency=np.asarray(target_curve.freqs, dtype=np.float64),
         raw=np.asarray(target_curve.db, dtype=np.float64),
     )
-    measurement.interpolate()
-    measurement.center()
-    target.interpolate()
-    target.center()
-    measurement.compensate(target, min_mean_error=True)
-    measurement.smoothen()
-    measurement.equalize(concha_interference=False)
+    measurement.process(
+        target=target,
+        min_mean_error=True,
+        fs=int(DEFAULT_SAMPLE_RATE),
+        concha_interference=False,
+    )
     peqs = measurement.optimize_parametric_eq(config, int(DEFAULT_SAMPLE_RATE))
 
     filters: list[EqFilter] = []

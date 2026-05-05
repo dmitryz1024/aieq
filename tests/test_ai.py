@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from source.ai import AiEqualizerService
+from source.ai import AiEqualizerService, sanitize_ai_preset_name
 from source.models import flat_preset
 
 
@@ -25,3 +25,8 @@ def test_llama_cpp_without_model_is_not_connected(monkeypatch) -> None:
 
 def test_new_preset_is_named_new() -> None:
     assert flat_preset().name == "New"
+
+
+def test_ai_generated_name_cannot_use_new_prefix() -> None:
+    assert sanitize_ai_preset_name("New V Shape", fallback="Media V Shape") == "Media V Shape"
+    assert sanitize_ai_preset_name("Warm Vocal Air Wide", fallback="AI Preset") == "Warm Vocal Air"
