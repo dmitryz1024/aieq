@@ -61,6 +61,15 @@ class PresetStore:
         preset.id = int(row["id"])
         return preset
 
+    def get_preset_by_name(self, name: str) -> Preset | None:
+        normalized = name.strip().casefold()
+        if not normalized:
+            return None
+        for preset in self.list_presets():
+            if preset.name.casefold() == normalized:
+                return preset
+        return None
+
     def save_new(self, preset: Preset, name: str | None = None) -> Preset:
         now = utc_now_iso()
         saved = preset.clone(name=name or preset.name, keep_id=False).sanitized()
@@ -92,4 +101,3 @@ class PresetStore:
     def delete(self, preset_id: int) -> None:
         with self._connect() as connection:
             connection.execute("DELETE FROM presets WHERE id = ?", (preset_id,))
-

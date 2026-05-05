@@ -5,6 +5,8 @@ import numpy as np
 from aieq.dsp import GRAPH_FREQS, design_fir_from_preset, envelope_response_db, filter_response_db
 from aieq.models import EqFilter, Preset
 from aieq.audio import AudioEngine
+from aieq.curves import FrequencyCurve
+from aieq.autoeq_service import build_autoeq_preset
 
 
 def test_zero_gain_peaking_is_flat() -> None:
@@ -37,3 +39,12 @@ def test_audio_engine_crossfades_updated_preset() -> None:
     out = engine._process_locked(block)
     assert out.shape == block.shape
     assert engine.fade_from_processor is not None
+
+
+def test_autoeq_service_builds_filters_from_curves() -> None:
+    freqs = np.geomspace(20, 20000, 128)
+    device = FrequencyCurve("Device", freqs, np.sin(np.linspace(0, 4, 128)) * 3)
+    target = FrequencyCurve("Target", freqs, np.zeros_like(freqs))
+    preset = build_autoeq_preset(device, target, max_filters=5)
+    assert preset.name.startswith("AutoEQ")
+    assert 1 <= len(preset.filters) <= 5
