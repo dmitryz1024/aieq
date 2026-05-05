@@ -63,6 +63,7 @@ class EqFilter:
 
 
 NEW_PRESET_NAME = "New"
+PRESET_NAME_MAX_LENGTH = 180
 
 
 @dataclass(slots=True)
@@ -86,7 +87,7 @@ class Preset:
 
     def sanitized(self, sample_rate: float = 48000.0) -> "Preset":
         clean = self.clone(keep_id=True)
-        clean.name = (clean.name or "Untitled").strip()[:80]
+        clean.name = (clean.name or "Untitled").strip()[:PRESET_NAME_MAX_LENGTH]
         clean.filters = [item.sanitized(sample_rate) for item in clean.filters]
         clean.updated_at = utc_now_iso()
         return clean
@@ -109,7 +110,7 @@ class Preset:
         if not isinstance(filters, list):
             filters = []
         preset = cls(
-            name=str(data.get("name", "Imported preset")).strip()[:80] or "Imported preset",
+            name=str(data.get("name", "Imported preset")).strip()[:PRESET_NAME_MAX_LENGTH] or "Imported preset",
             filters=[EqFilter.from_dict(item) for item in filters if isinstance(item, dict)],
             id=int(data["id"]) if data.get("id") is not None else None,
             version=int(data.get("version", 1)),

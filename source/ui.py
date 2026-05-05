@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -68,6 +69,18 @@ NEW_PRESET_ID = "__new__"
 DEFAULT_WINDOW_WIDTH = 1480
 DEFAULT_WINDOW_HEIGHT = 900
 DEFAULT_SPLITTER_SIZES = (1040, 440)
+LEGEND_LABEL_MAX_CHARS = 34
+
+
+def elide_middle(text: str, max_chars: int = LEGEND_LABEL_MAX_CHARS) -> str:
+    clean = " ".join(str(text).split())
+    if len(clean) <= max_chars:
+        return clean
+    if max_chars <= 3:
+        return "." * max_chars
+    left = (max_chars - 3 + 1) // 2
+    right = max_chars - 3 - left
+    return f"{clean[:left]}...{clean[-right:]}"
 
 
 class FrequencyAxisItem(pg.AxisItem):
@@ -106,6 +119,7 @@ class FrequencyAxisItem(pg.AxisItem):
 class HoverLegendItem(pg.LegendItem):
     COLLAPSED_WIDTH = 24
     COLLAPSED_HEIGHT = 24
+    MAX_ROWS_PER_COLUMN = 6
     EXPANDED_PADDING_X = 18
     EXPANDED_PADDING_Y = 14
 
@@ -116,18 +130,24 @@ class HoverLegendItem(pg.LegendItem):
         self.set_collapsed(True)
 
     def addItem(self, item, name):  # type: ignore[override]
-        super().addItem(item, name)
+        display_name = elide_middle(str(name))
+        super().addItem(item, display_name)
+        if self.items:
+            _sample, label = self.items[-1]
+            label.setToolTip(str(name))
+        self._reflow_items()
         self.set_collapsed(self._collapsed)
 
     def removeItem(self, item):  # type: ignore[override]
         super().removeItem(item)
+        self._reflow_items()
         self.set_collapsed(self._collapsed)
 
     def updateSize(self):  # type: ignore[override]
         if self._collapsed:
             self.setGeometry(0, 0, self.COLLAPSED_WIDTH, self.COLLAPSED_HEIGHT)
             return
-        super().updateSize()
+        self._reflow_items()
         self._fit_expanded_geometry()
 
     def hoverEvent(self, ev):  # type: ignore[override]
@@ -149,10 +169,22 @@ class HoverLegendItem(pg.LegendItem):
         else:
             self.setMinimumSize(0, 0)
             self.setMaximumSize(16777215, 16777215)
-            super().updateSize()
+            self._reflow_items()
             self._fit_expanded_geometry()
         self._reanchor()
         self.update()
+
+    def _reflow_items(self) -> None:
+        for index in range(self.layout.count() - 1, -1, -1):
+            self.layout.removeAt(index)
+        columns = max(1, int(np.ceil(len(self.items) / self.MAX_ROWS_PER_COLUMN)))
+        self.columnCount = columns
+        self.rowCount = min(self.MAX_ROWS_PER_COLUMN, max(1, len(self.items)))
+        for index, (sample, label) in enumerate(self.items):
+            column = index // self.MAX_ROWS_PER_COLUMN
+            row = index % self.MAX_ROWS_PER_COLUMN
+            self.layout.addItem(sample, row, column * 2)
+            self.layout.addItem(label, row, column * 2 + 1)
 
     def _fit_expanded_geometry(self) -> None:
         if self._collapsed:
@@ -169,20 +201,33 @@ class HoverLegendItem(pg.LegendItem):
     def _expanded_size(self) -> tuple[float, float]:
         if not self.items:
             return float(self.COLLAPSED_WIDTH), float(self.COLLAPSED_HEIGHT)
-        row_widths: list[float] = []
-        row_heights: list[float] = []
+        column_widths: list[float] = []
+        column_heights: list[float] = []
         spacing_x = max(8.0, float(self.layout.horizontalSpacing()))
         spacing_y = max(4.0, float(self.layout.verticalSpacing()))
-        for sample, label in self.items:
-            sample_width = max(float(sample.width()), float(sample.boundingRect().width()), 20.0)
-            sample_height = max(float(sample.height()), float(sample.boundingRect().height()), 12.0)
-            label_width = max(float(label.width()), float(label.boundingRect().width()))
-            label_height = max(float(label.height()), float(label.boundingRect().height()), 14.0)
-            row_widths.append(sample_width + spacing_x + label_width)
-            row_heights.append(max(sample_height, label_height))
-        width = max(row_widths) + self.EXPANDED_PADDING_X
-        height = sum(row_heights) + spacing_y * max(0, len(row_heights) - 1) + self.EXPANDED_PADDING_Y
+        for column_start in range(0, len(self.items), self.MAX_ROWS_PER_COLUMN):
+            column_items = self.items[column_start : column_start + self.MAX_ROWS_PER_COLUMN]
+            row_widths: list[float] = []
+            row_heights: list[float] = []
+            for sample, label in column_items:
+                sample_width, sample_height, label_width, label_height = self._item_metrics(sample, label)
+                row_widths.append(sample_width + spacing_x + label_width)
+                row_heights.append(max(sample_height, label_height))
+            column_widths.append(max(row_widths, default=0.0))
+            column_heights.append(sum(row_heights) + spacing_y * max(0, len(row_heights) - 1))
+        width = sum(column_widths) + spacing_x * max(0, len(column_widths) - 1) + self.EXPANDED_PADDING_X
+        height = max(column_heights, default=0.0) + self.EXPANDED_PADDING_Y
         return max(width, float(self.COLLAPSED_WIDTH)), max(height, float(self.COLLAPSED_HEIGHT))
+
+    def _item_metrics(self, sample, label) -> tuple[float, float, float, float]:
+        sample_rect = sample.boundingRect()
+        text_item = getattr(label, "item", None)
+        label_rect = text_item.boundingRect() if text_item is not None else label.boundingRect()
+        sample_width = max(float(sample_rect.width()), 20.0)
+        sample_height = max(float(sample_rect.height()), 12.0)
+        label_width = max(float(label_rect.width()), 1.0)
+        label_height = max(float(label_rect.height()), 14.0)
+        return sample_width, sample_height, label_width, label_height
 
     def _reanchor(self) -> None:
         if self.parentItem() is None:
@@ -198,7 +243,7 @@ class HoverLegendItem(pg.LegendItem):
             p.setBrush(pg.mkBrush(17, 19, 24, 230))
             p.drawRect(self.boundingRect())
             font = p.font()
-            font.setPointSize(9)
+            font.setPointSize(13)
             p.setFont(font)
             p.setPen(pg.mkPen("#cfd6df"))
             p.drawText(self.boundingRect(), Qt.AlignmentFlag.AlignCenter, "~")
@@ -215,6 +260,7 @@ class AiWorker(QObject):
         *,
         saved_presets: list[Preset],
         model_path: Path | None,
+        device_curve: FrequencyCurve | None,
     ) -> None:
         super().__init__()
         self.service = service
@@ -222,6 +268,7 @@ class AiWorker(QObject):
         self.preset = preset
         self.saved_presets = saved_presets
         self.model_path = model_path
+        self.device_curve = device_curve
 
     def run(self) -> None:
         self.finished.emit(
@@ -230,6 +277,7 @@ class AiWorker(QObject):
                 self.preset,
                 saved_presets=self.saved_presets,
                 model_path=self.model_path,
+                device_curve=self.device_curve,
             )
         )
 
@@ -380,6 +428,7 @@ class MainWindow(QMainWindow):
         self.compare_ids: set[int] = set()
         self.device_curves: list[FrequencyCurve] = []
         self.target_curves: list[FrequencyCurve] = []
+        self.target_options: list[FrequencyCurve] = []
         self.selected_device_curve: FrequencyCurve | None = None
         self.input_devices: list[AudioDevice] = []
         self.output_devices: list[AudioDevice] = []
@@ -1017,28 +1066,48 @@ class MainWindow(QMainWindow):
 
         self.target_curve_combo.blockSignals(True)
         self.target_curve_combo.clear()
-        target_index = 0
-        for index, curve in enumerate(self.target_curves):
-            self.target_curve_combo.addItem(curve.name, index)
-            if curve.name == previous_target:
-                target_index = index
-        if self.target_curves:
-            self.target_curve_combo.setCurrentIndex(target_index)
-        self.target_curve_combo.blockSignals(False)
         self.device_curve_combo.setEnabled(bool(self.device_curves))
-        self.target_curve_combo.setEnabled(bool(self.target_curves))
-        self.run_autoeq_button.setEnabled(bool(self.target_curves))
+        self.rebuild_target_curve_combo(previous_target)
         self.update_graph()
         if show_feedback:
             self.show_toast("Списки кривых обновлены")
 
     def on_device_curve_changed(self, index: int) -> None:
         if 0 <= index < len(self.device_curves):
+            previous_target = self.target_curve_combo.currentText()
             self.selected_device_curve = self.device_curves[index]
+            self.rebuild_target_curve_combo(previous_target)
             self.update_graph()
 
     def on_target_curve_changed(self, _index: int) -> None:
         self.update_graph()
+
+    def rebuild_target_curve_combo(self, previous_target: str = "") -> None:
+        selected_name = self.selected_device_curve.name if self.selected_device_curve is not None else ""
+        options: list[FrequencyCurve] = []
+        seen: set[str] = set()
+        for curve in [*self.target_curves, *self.device_curves]:
+            if curve.name == "Default" or (selected_name and curve.name == selected_name):
+                continue
+            key = curve.name.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            options.append(curve)
+        self.target_options = options
+
+        self.target_curve_combo.blockSignals(True)
+        self.target_curve_combo.clear()
+        target_index = 0
+        for index, curve in enumerate(self.target_options):
+            self.target_curve_combo.addItem(curve.name, index)
+            if curve.name == previous_target:
+                target_index = index
+        if self.target_options:
+            self.target_curve_combo.setCurrentIndex(target_index)
+        self.target_curve_combo.blockSignals(False)
+        self.target_curve_combo.setEnabled(bool(self.target_options))
+        self.run_autoeq_button.setEnabled(bool(self.target_options))
 
     def selected_device_response_db(self) -> np.ndarray:
         if self.selected_device_curve is None:
@@ -1049,9 +1118,9 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "target_curve_combo"):
             return None
         target_index = self.target_curve_combo.currentData()
-        if target_index is None or not (0 <= int(target_index) < len(self.target_curves)):
+        if target_index is None or not (0 <= int(target_index) < len(self.target_options)):
             return None
-        return self.target_curves[int(target_index)].response_db(GRAPH_FREQS)
+        return self.target_options[int(target_index)].response_db(GRAPH_FREQS)
 
     def refresh_presets(self) -> None:
         self.saved_presets = self.store.list_presets()
@@ -1373,8 +1442,21 @@ class MainWindow(QMainWindow):
             index += 1
         return f"{base} {index}"
 
-    def save_generated_preset(self, preset: Preset) -> Preset:
-        return self.store.save_new(preset, name=self.next_available_preset_name(preset.name))
+    def timestamp_parts(self) -> tuple[str, str]:
+        now = datetime.now()
+        return now.strftime("%Y-%m-%d"), now.strftime("%H-%M-%S")
+
+    def ai_preset_name(self) -> str:
+        date, time = self.timestamp_parts()
+        return f"AIEQ {date} | {time}"
+
+    def autoeq_preset_name(self, mode: str, origin: str, target: str) -> str:
+        date, time = self.timestamp_parts()
+        return f"AutoEQ {mode} | {date} | {time} – {origin} to {target}"
+
+    def save_generated_preset(self, preset: Preset, *, name: str | None = None) -> Preset:
+        preset_name = name or preset.name
+        return self.store.save_new(preset, name=self.next_available_preset_name(preset_name))
 
     def import_preset(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Импорт пресета", str(Path.cwd()), "JSON (*.json)")
@@ -1406,10 +1488,10 @@ class MainWindow(QMainWindow):
             self.show_toast("Выберите устройство")
             return
         target_index = self.target_curve_combo.currentData()
-        if target_index is None or not (0 <= int(target_index) < len(self.target_curves)):
+        if target_index is None or not (0 <= int(target_index) < len(self.target_options)):
             self.show_toast("Выберите целевую кривую")
             return
-        target_curve = self.target_curves[int(target_index)]
+        target_curve = self.target_options[int(target_index)]
         backend = str(self.autoeq_backend_combo.currentData() or "local")
         try:
             result = build_autoeq_preset_result(self.selected_device_curve, target_curve, backend=backend)
@@ -1417,7 +1499,12 @@ class MainWindow(QMainWindow):
             self.show_toast("AutoEQ недоступен", timeout_ms=4200)
             return
         preset = result.preset
-        saved = self.save_generated_preset(preset)
+        preset_name = self.autoeq_preset_name(
+            self.autoeq_backend_combo.currentText(),
+            self.selected_device_curve.name,
+            target_curve.name,
+        )
+        saved = self.save_generated_preset(preset, name=preset_name)
         self.current_preset = saved.clone(keep_id=True)
         self.show_target_checkbox.setChecked(True)
         self.populate_filter_editor()
@@ -1560,6 +1647,7 @@ class MainWindow(QMainWindow):
             self.current_preset.clone(keep_id=True),
             saved_presets=[preset.clone(keep_id=True) for preset in self.saved_presets],
             model_path=self.selected_ai_model_path(),
+            device_curve=self.selected_device_curve,
         )
         self._ai_worker.moveToThread(self._ai_thread)
         self._ai_thread.started.connect(self._ai_worker.run)
@@ -1576,7 +1664,7 @@ class MainWindow(QMainWindow):
             self.send_button.setEnabled(True)
             self.send_button.setText("Отправить")
             return
-        saved = self.save_generated_preset(result.preset)
+        saved = self.save_generated_preset(result.preset, name=self.ai_preset_name())
         self.current_preset = saved.clone(keep_id=True)
         self.populate_filter_editor()
         self.refresh_presets()

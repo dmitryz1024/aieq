@@ -42,11 +42,3 @@ include = ["source*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-
-[[tool.uv.index]]
-name = "llama-cpp-python-cpu"
-url = "https://abetlen.github.io/llama-cpp-python/whl/cpu"
-explicit = true
-
-[tool.uv.sources]
-llama-cpp-python = { index = "llama-cpp-python-cpu" }

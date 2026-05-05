@@ -20,11 +20,34 @@ uv sync --python 3.11 --extra dev --extra autoeq --extra build --extra ai
 Copy-Item .env.example .env
 ```
 
-В проекте задан prebuilt CPU wheel index для `llama-cpp-python`, поэтому Visual Studio Build Tools для обычной CPU-установки не нужны.
+## CUDA / GPU
+
+Код приложения теперь передает в `llama-cpp-python` параметры GPU offload (`n_gpu_layers`, `n_batch`). На Windows для реального CUDA-ускорения надежный вариант - собрать `llama-cpp-python` из исходников с `GGML_CUDA=on`.
+
+Минимальная подготовка:
+
+1. Установите NVIDIA Driver, CUDA Toolkit и Visual Studio Build Tools с C++ workload.
+2. Откройте Developer PowerShell for VS.
+3. Переустановите backend:
+
+```powershell
+$env:CMAKE_ARGS="-DGGML_CUDA=on"
+$env:FORCE_CMAKE="1"
+uv pip install --reinstall --no-cache-dir --no-binary llama-cpp-python llama-cpp-python
+```
+
+GPU offload управляется из `.env`:
+
+```ini
+AIEQ_LLAMA_N_GPU_LAYERS=-1
+AIEQ_LLAMA_N_BATCH=512
+```
+
+`-1` означает попытку выгрузить на GPU все слои. Если 4 ГБ VRAM не хватит, поставьте меньшее значение, например `20` или `28`.
 
 ## Модель
 
-Рекомендуемый CPU-вариант: `Qwen/Qwen2.5-3B-Instruct-GGUF`, файл `qwen2.5-3b-instruct-q4_k_m.gguf`.
+Рекомендуемая компактная модель: `Qwen/Qwen2.5-3B-Instruct-GGUF`, файл `qwen2.5-3b-instruct-q4_k_m.gguf`.
 
 1. Создайте папку `models`, если ее нет.
 2. Скачайте `qwen2.5-3b-instruct-q4_k_m.gguf` со страницы Hugging Face `Qwen/Qwen2.5-3B-Instruct-GGUF`.
@@ -39,9 +62,10 @@ models/qwen2.5-3b-instruct-q4_k_m.gguf
 ```ini
 AIEQ_AI_PROVIDER=llama_cpp
 AIEQ_LLAMA_MODEL_PATH=models/qwen2.5-3b-instruct-q4_k_m.gguf
-AIEQ_LLAMA_N_CTX=4096
+AIEQ_LLAMA_N_CTX=8192
 AIEQ_LLAMA_N_THREADS=7
-AIEQ_LLAMA_N_GPU_LAYERS=0
+AIEQ_LLAMA_N_GPU_LAYERS=-1
+AIEQ_LLAMA_N_BATCH=512
 AIEQ_AUTOEQ_BACKEND=auto
 ```
 

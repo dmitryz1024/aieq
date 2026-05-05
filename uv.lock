@@ -41,7 +41,7 @@ openai = [
 [package.metadata]
 requires-dist = [
     { name = "autoeq", marker = "python_full_version < '3.12' and extra == 'autoeq'", specifier = ">=4.1.2" },
-    { name = "llama-cpp-python", marker = "extra == 'ai'", specifier = ">=0.3.7", index = "https://abetlen.github.io/llama-cpp-python/whl/cpu" },
+    { name = "llama-cpp-python", marker = "extra == 'ai'", specifier = ">=0.3.7" },
     { name = "numpy", marker = "python_full_version < '3.12'", specifier = ">=1.24.4,<1.25" },
     { name = "numpy", marker = "python_full_version >= '3.12'", specifier = ">=1.26" },
     { name = "openai", marker = "extra == 'openai'", specifier = ">=1.59.0" },
@@ -588,7 +588,7 @@ wheels = [
 [[package]]
 name = "llama-cpp-python"
 version = "0.3.22"
-source = { registry = "https://abetlen.github.io/llama-cpp-python/whl/cpu" }
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "diskcache" },
     { name = "jinja2" },
