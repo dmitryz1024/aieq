@@ -34,24 +34,11 @@ def _smooth_log_curve(values: np.ndarray, window: int = 41) -> np.ndarray:
     return np.convolve(padded, kernel, mode="valid")
 
 
-def _quality_from_width(freqs: np.ndarray, residual: np.ndarray, index: int) -> float:
-    peak = residual[index]
-    threshold = abs(peak) * 0.42
-    left = index
-    right = index
-    while left > 0 and abs(residual[left]) >= threshold and np.sign(residual[left]) == np.sign(peak):
-        left -= 1
-    while right < residual.size - 1 and abs(residual[right]) >= threshold and np.sign(residual[right]) == np.sign(peak):
-        right += 1
-    bandwidth = max(freqs[right] - freqs[left], freqs[index] * 0.16)
-    return float(np.clip(freqs[index] / bandwidth, 0.45, 6.0))
-
-
 def build_autoeq_preset_result(
     device_curve: FrequencyCurve,
     target_curve: FrequencyCurve,
     *,
-    max_filters: int = 8,
+    max_filters: int = 12,
     backend: str | None = None,
 ) -> AutoEqPresetResult:
     backend = (backend or os.environ.get("AIEQ_AUTOEQ_BACKEND", "auto")).strip().lower() or "auto"
@@ -81,7 +68,7 @@ def build_autoeq_preset(
     device_curve: FrequencyCurve,
     target_curve: FrequencyCurve,
     *,
-    max_filters: int = 8,
+    max_filters: int = 12,
     backend: str | None = None,
 ) -> Preset:
     return build_autoeq_preset_result(device_curve, target_curve, max_filters=max_filters, backend=backend).preset
@@ -168,42 +155,97 @@ def _official_filter_to_eq_filter(official_filter: Any) -> EqFilter | None:
     ).sanitized()
 
 
-def _build_local_autoeq_preset(device_curve: FrequencyCurve, target_curve: FrequencyCurve, *, max_filters: int = 8) -> Preset:
+def _build_local_autoeq_preset(
+    device_curve: FrequencyCurve,
+    target_curve: FrequencyCurve,
+    *,
+    max_filters: int = 12,
+) -> Preset:
     device = device_curve.response_db(GRAPH_FREQS)
     target = target_curve.response_db(GRAPH_FREQS)
-    residual = _smooth_log_curve(target - device)
+    desired = np.clip(target - device, -18.0, 18.0)
+    residual = _smooth_log_curve(desired, window=15)
+    weights = _fit_weights(GRAPH_FREQS)
     filters: list[EqFilter] = []
 
-    low_mask = (GRAPH_FREQS >= 30.0) & (GRAPH_FREQS <= 140.0)
-    high_mask = (GRAPH_FREQS >= 9000.0) & (GRAPH_FREQS <= 18000.0)
-
-    low_gain = float(np.clip(np.mean(residual[low_mask]), -9.0, 9.0))
-    if abs(low_gain) >= 1.0:
-        eq_filter = EqFilter("low_shelf", 105.0, 0.7, low_gain)
-        filters.append(eq_filter)
-        residual -= filter_response_db(eq_filter, GRAPH_FREQS)
-
-    high_gain = float(np.clip(np.mean(residual[high_mask]), -9.0, 9.0))
-    if abs(high_gain) >= 1.0 and len(filters) < max_filters:
-        eq_filter = EqFilter("high_shelf", 9000.0, 0.75, high_gain)
-        filters.append(eq_filter)
-        residual -= filter_response_db(eq_filter, GRAPH_FREQS)
-
-    usable = (GRAPH_FREQS >= 35.0) & (GRAPH_FREQS <= 10000.0)
-    for _ in range(max_filters - len(filters)):
-        masked = np.where(usable, residual, 0.0)
-        index = int(np.argmax(np.abs(masked)))
-        gain = float(np.clip(masked[index], -8.0, 8.0))
-        if abs(gain) < 0.9:
+    for _ in range(max_filters):
+        candidate = _best_local_filter(GRAPH_FREQS, residual, weights)
+        if candidate is None or abs(candidate.gain) < 0.35:
             break
-        freq = float(np.clip(GRAPH_FREQS[index], 20.0, 20000.0))
-        q = _quality_from_width(GRAPH_FREQS, residual, index)
-        eq_filter = EqFilter("peaking", round(freq), q, gain).sanitized()
-        filters.append(eq_filter)
-        residual -= filter_response_db(eq_filter, GRAPH_FREQS)
-        residual = _smooth_log_curve(residual, window=17)
+        filters.append(candidate)
+        residual -= filter_response_db(candidate, GRAPH_FREQS)
+        residual = _smooth_log_curve(residual, window=9)
+        if _weighted_error(residual, weights) < 0.10:
+            break
 
+    filters = _prune_tiny_filters(filters)
+    filters.sort(key=lambda item: (item.freq, item.type))
     return Preset(name=_autoeq_name(device_curve, target_curve), filters=filters).sanitized()
+
+
+def _fit_weights(freqs: np.ndarray) -> np.ndarray:
+    weights = np.ones_like(freqs, dtype=np.float64)
+    weights[(freqs >= 80.0) & (freqs <= 9000.0)] = 1.35
+    weights[(freqs < 35.0) | (freqs > 16000.0)] = 0.45
+    return weights
+
+
+def _weighted_error(residual: np.ndarray, weights: np.ndarray) -> float:
+    return float(np.mean(weights * np.square(residual)))
+
+
+def _best_local_filter(freqs: np.ndarray, residual: np.ndarray, weights: np.ndarray) -> EqFilter | None:
+    base_error = _weighted_error(residual, weights)
+    candidates: list[tuple[str, float, float]] = []
+    for index in _residual_peak_indexes(freqs, residual, limit=22):
+        freq = float(np.clip(freqs[index], 20.0, 20000.0))
+        for q in (0.45, 0.6, 0.8, 1.0, 1.35, 1.8, 2.5, 3.5, 5.0, 7.0):
+            candidates.append(("peaking", freq, q))
+    for freq in (55.0, 80.0, 105.0, 140.0, 190.0):
+        candidates.append(("low_shelf", freq, 0.7))
+    for freq in (5000.0, 6500.0, 8000.0, 10000.0, 12500.0):
+        candidates.append(("high_shelf", freq, 0.7))
+
+    best_filter: EqFilter | None = None
+    best_error = base_error
+    for filter_type, freq, q in candidates:
+        unit = filter_response_db(EqFilter(filter_type, freq, q, 1.0), freqs)
+        denominator = float(np.sum(weights * unit * unit))
+        if denominator <= 1e-9:
+            continue
+        gain = float(np.sum(weights * residual * unit) / denominator)
+        gain = float(np.clip(gain, -9.0, 9.0))
+        if abs(gain) < 0.25:
+            continue
+        eq_filter = EqFilter(filter_type, round(freq), q, gain).sanitized()
+        next_residual = residual - filter_response_db(eq_filter, freqs)
+        error = _weighted_error(next_residual, weights)
+        if error < best_error - 0.004:
+            best_error = error
+            best_filter = eq_filter
+    return best_filter
+
+
+def _residual_peak_indexes(freqs: np.ndarray, residual: np.ndarray, *, limit: int) -> list[int]:
+    usable = (freqs >= 30.0) & (freqs <= 14500.0)
+    order = np.argsort(np.abs(np.where(usable, residual, 0.0)))[::-1]
+    selected: list[int] = []
+    min_log_distance = 0.035
+    for raw_index in order:
+        index = int(raw_index)
+        if not usable[index] or abs(residual[index]) < 0.25:
+            break
+        log_freq = float(np.log10(freqs[index]))
+        if any(abs(log_freq - float(np.log10(freqs[item]))) < min_log_distance for item in selected):
+            continue
+        selected.append(index)
+        if len(selected) >= limit:
+            break
+    return selected
+
+
+def _prune_tiny_filters(filters: list[EqFilter]) -> list[EqFilter]:
+    return [item for item in filters if abs(item.gain) >= 0.25]
 
 
 def _autoeq_name(device_curve: FrequencyCurve, target_curve: FrequencyCurve) -> str:

@@ -10,6 +10,7 @@ from PySide6.QtCore import QEvent, QObject, QSettings, Qt, QThread, QTimer, Sign
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QAbstractScrollArea,
+    QAbstractSpinBox,
     QApplication,
     QCheckBox,
     QComboBox,
@@ -22,6 +23,9 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QInputDialog,
     QLabel,
+    QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMenu,
     QMessageBox,
@@ -32,13 +36,15 @@ from PySide6.QtWidgets import (
     QTabWidget,
     QTextBrowser,
     QTextEdit,
+    QWidgetAction,
     QVBoxLayout,
     QWidget,
 )
 
 from .ai import AiEqualizerService, AiPresetResult, list_local_models
 from .autoeq_service import AutoEqOfficialUnavailable, build_autoeq_preset_result
-from .audio import AudioDevice, AudioEngine, list_audio_devices, refresh_audio_backend
+from .audio import AudioDevice, AudioEngine, AudioStreamSetting, list_audio_devices, list_supported_stream_settings, refresh_audio_backend
+from .chat_storage import ChatSession, ChatStore, chat_title_from_first_user_message
 from .curves import DEVICE_CURVES_DIR, TARGET_CURVES_DIR, FrequencyCurve, ensure_curve_dirs, list_curves
 from .dsp import DEFAULT_SAMPLE_RATE, GRAPH_FREQS, preset_response_db
 from .models import FILTER_TYPES, EqFilter, Preset, flat_preset
@@ -249,6 +255,89 @@ class HoverLegendItem(pg.LegendItem):
             p.drawText(self.boundingRect(), Qt.AlignmentFlag.AlignCenter, "~")
 
 
+class SearchableComboBox(QComboBox):
+    def __init__(self, *, empty_text: str) -> None:
+        super().__init__()
+        self.empty_text = empty_text
+        self._search_popup: QMenu | None = None
+
+    def showPopup(self) -> None:  # type: ignore[override]
+        menu = QMenu(self)
+        menu.setObjectName("searchPopup")
+        container = QWidget(menu)
+        popup_width = max(80, self.width())
+        container.setFixedWidth(popup_width)
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(6)
+
+        search = QLineEdit(container)
+        search.setObjectName("comboSearch")
+        search.setPlaceholderText("Поиск")
+        list_widget = QListWidget(container)
+        list_widget.setObjectName("comboSearchList")
+        list_widget.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        list_widget.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        search.setFixedWidth(popup_width - 12)
+        list_widget.setFixedWidth(popup_width - 12)
+        list_widget.setMaximumHeight(260)
+        layout.addWidget(search)
+        layout.addWidget(list_widget)
+
+        def populate(query: str = "") -> None:
+            list_widget.clear()
+            query = query.strip().casefold()
+            matches = [
+                index
+                for index in range(self.count())
+                if not query or query in self.itemText(index).casefold()
+            ]
+            if not matches:
+                item = QListWidgetItem(self.empty_text)
+                item.setFlags(Qt.ItemFlag.NoItemFlags)
+                list_widget.addItem(item)
+                return
+            for index in matches:
+                item = QListWidgetItem(self.itemText(index))
+                item.setData(Qt.ItemDataRole.UserRole, index)
+                if index == self.currentIndex():
+                    item.setSelected(True)
+                list_widget.addItem(item)
+
+        def choose(item: QListWidgetItem) -> None:
+            index = item.data(Qt.ItemDataRole.UserRole)
+            if index is None:
+                return
+            self.setCurrentIndex(int(index))
+            menu.close()
+
+        populate()
+        search.textChanged.connect(populate)
+        list_widget.itemClicked.connect(choose)
+
+        action = QWidgetAction(menu)
+        action.setDefaultWidget(container)
+        menu.addAction(action)
+        self._search_popup = menu
+        QTimer.singleShot(0, search.setFocus)
+        menu.exec(self.mapToGlobal(self.rect().bottomLeft()))
+        self._search_popup = None
+
+
+class ChatInput(QTextEdit):
+    submit_requested = Signal()
+
+    def keyPressEvent(self, event) -> None:  # type: ignore[override]
+        if event.key() in {Qt.Key.Key_Return, Qt.Key.Key_Enter}:
+            if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                super().keyPressEvent(event)
+                return
+            event.accept()
+            self.submit_requested.emit()
+            return
+        super().keyPressEvent(event)
+
+
 class AiWorker(QObject):
     finished = Signal(object)
 
@@ -288,7 +377,7 @@ class AiWorker(QObject):
 class FilterEditorRow(QFrame):
     changed = Signal()
     selected = Signal(object)
-    FIXED_WIDTH = 430
+    FIXED_WIDTH = 458
     FIXED_HEIGHT = 122
 
     def __init__(self, eq_filter: EqFilter, index: int) -> None:
@@ -310,7 +399,7 @@ class FilterEditorRow(QFrame):
         self.enabled_check.setToolTip("Вкл")
         self.enabled_check.setFixedWidth(24)
         self.enabled_check.setChecked(eq_filter.enabled)
-        self.type_combo = QComboBox()
+        self.type_combo = SearchableComboBox(empty_text="Нет типов")
         self.type_combo.addItems(FILTER_TYPES)
         self.type_combo.setCurrentText(eq_filter.type)
         self.type_combo.setFixedWidth(76)
@@ -329,7 +418,9 @@ class FilterEditorRow(QFrame):
         self.gain_spin.setSingleStep(0.25)
         self.gain_spin.setKeyboardTracking(False)
         self.gain_spin.setValue(eq_filter.gain)
-        self.gain_spin.setFixedWidth(72)
+        self.gain_spin.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.gain_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
+        self.gain_spin.setFixedWidth(82)
 
         self.freq_spin = QDoubleSpinBox()
         self.freq_spin.setRange(20.0, 20000.0)
@@ -337,7 +428,9 @@ class FilterEditorRow(QFrame):
         self.freq_spin.setSingleStep(10.0)
         self.freq_spin.setKeyboardTracking(False)
         self.freq_spin.setValue(eq_filter.freq)
-        self.freq_spin.setFixedWidth(78)
+        self.freq_spin.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.freq_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
+        self.freq_spin.setFixedWidth(92)
 
         self.q_spin = QDoubleSpinBox()
         self.q_spin.setRange(0.1, 18.0)
@@ -345,7 +438,9 @@ class FilterEditorRow(QFrame):
         self.q_spin.setSingleStep(0.01)
         self.q_spin.setKeyboardTracking(False)
         self.q_spin.setValue(eq_filter.q)
-        self.q_spin.setFixedWidth(66)
+        self.q_spin.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.q_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
+        self.q_spin.setFixedWidth(76)
 
         index_label = QLabel(f"{index + 1:02d}")
         index_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -424,10 +519,14 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("AIEQ")
         self.store = PresetStore()
+        self.chat_store = ChatStore()
         self.ai_service = AiEqualizerService()
         self.audio_engine = AudioEngine()
         self.current_preset = flat_preset()
         self.saved_presets: list[Preset] = []
+        self.chat_sessions: list[ChatSession] = []
+        self.current_chat_id: int | None = None
+        self.current_chat_context_full = False
         self.compare_ids: set[int] = set()
         self.device_curves: list[FrequencyCurve] = []
         self.target_curves: list[FrequencyCurve] = []
@@ -435,6 +534,7 @@ class MainWindow(QMainWindow):
         self.selected_device_curve: FrequencyCurve | None = None
         self.input_devices: list[AudioDevice] = []
         self.output_devices: list[AudioDevice] = []
+        self.audio_settings: list[AudioStreamSetting] = []
         self._updating = False
         self._ai_thread: QThread | None = None
         self._ai_worker: AiWorker | None = None
@@ -448,12 +548,16 @@ class MainWindow(QMainWindow):
         self.toast_timer = QTimer(self)
         self.toast_timer.setSingleShot(True)
         self.toast_timer.timeout.connect(self.hide_toast)
+        self.audio_latency_timer = QTimer(self)
+        self.audio_latency_timer.timeout.connect(self.update_audio_latency_label)
 
         ensure_curve_dirs()
         self._build_ui()
         self._apply_style()
         self.refresh_devices()
         self.refresh_ai_models()
+        self.refresh_chat_sessions()
+        self.restore_chat_session()
         self.refresh_curve_lists()
         self.refresh_presets()
         self.populate_filter_editor()
@@ -468,6 +572,8 @@ class MainWindow(QMainWindow):
             return
         self.save_window_layout()
         self.audio_engine.stop()
+        self.audio_latency_timer.stop()
+        self.ai_service.shutdown()
         super().closeEvent(event)
 
     def _build_ui(self) -> None:
@@ -542,30 +648,54 @@ class MainWindow(QMainWindow):
         layout.setHorizontalSpacing(8)
         layout.setVerticalSpacing(6)
 
-        self.input_combo = QComboBox()
-        self.output_combo = QComboBox()
+        self.input_combo = SearchableComboBox(empty_text="Нет входов")
+        self.output_combo = SearchableComboBox(empty_text="Нет выходов")
+        self.sample_rate_combo = SearchableComboBox(empty_text="Нет частот")
+        self.audio_dtype_combo = SearchableComboBox(empty_text="Нет форматов")
         self._configure_flexible_combo(self.input_combo, min_chars=24)
         self._configure_flexible_combo(self.output_combo, min_chars=24)
-        self.refresh_devices_button = QPushButton("Обновить")
+        self.sample_rate_combo.setFixedWidth(104)
+        self.audio_dtype_combo.setFixedWidth(118)
+        self.input_combo.currentIndexChanged.connect(self.refresh_audio_settings)
+        self.output_combo.currentIndexChanged.connect(self.refresh_audio_settings)
+        self.sample_rate_combo.currentIndexChanged.connect(self.refresh_audio_dtype_options)
+        self.refresh_devices_button = QPushButton("↻")
         self.refresh_devices_button.setObjectName("refreshDevicesButton")
+        self.refresh_devices_button.setToolTip("Обновить устройства")
+        self.refresh_devices_button.setFixedSize(34, 30)
+        self.refresh_devices_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.refresh_devices_button.clicked.connect(self.refresh_devices)
 
-        self.audio_button = QPushButton("Старт")
+        self.audio_button = QPushButton("▶")
         self.audio_button.setObjectName("audioButton")
         self.audio_button.setProperty("running", False)
+        self.audio_button.setToolTip("Старт")
+        self.audio_button.setFixedSize(38, 30)
+        self.audio_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.audio_button.clicked.connect(self.toggle_audio)
-        self.status_label = QLabel("Аудио остановлено")
+        self.status_label = QLabel("--")
+        self.status_label.setObjectName("latencyLabel")
+        self.status_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self.status_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        transport = QWidget()
+        transport_layout = QHBoxLayout(transport)
+        transport_layout.setContentsMargins(0, 0, 0, 0)
+        transport_layout.setSpacing(4)
+        transport_layout.addWidget(self.audio_button)
+        transport_layout.addWidget(self.status_label)
 
         layout.addWidget(QLabel("Вход"), 0, 0)
         layout.addWidget(self.input_combo, 0, 1)
         layout.addWidget(QLabel("Выход"), 0, 2)
         layout.addWidget(self.output_combo, 0, 3)
-        layout.addWidget(self.refresh_devices_button, 0, 4)
-        layout.addWidget(self.audio_button, 0, 5)
-        layout.addWidget(self.status_label, 0, 6)
+        layout.addWidget(QLabel("SR (Hz)"), 0, 4)
+        layout.addWidget(self.sample_rate_combo, 0, 5)
+        layout.addWidget(QLabel("Формат"), 0, 6)
+        layout.addWidget(self.audio_dtype_combo, 0, 7)
+        layout.addWidget(self.refresh_devices_button, 0, 8)
+        layout.addWidget(transport, 0, 9)
         layout.setColumnStretch(1, 2)
         layout.setColumnStretch(3, 2)
-        layout.setColumnStretch(6, 1)
         return panel
 
     def _build_left_panel(self) -> QWidget:
@@ -640,11 +770,17 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.plot, 1)
 
         controls = QHBoxLayout()
-        self.device_curve_combo = QComboBox()
-        self.device_curve_combo.setFixedWidth(180)
+        self.device_curve_combo = SearchableComboBox(empty_text="Нет устройств")
+        self._configure_flexible_combo(self.device_curve_combo, min_chars=14)
         self.device_curve_combo.setMaxVisibleItems(12)
         self.device_curve_combo.currentIndexChanged.connect(self.on_device_curve_changed)
-        self.current_selector = QComboBox()
+        self.refresh_curves_button = QPushButton("↻")
+        self.refresh_curves_button.setObjectName("refreshCurvesButton")
+        self.refresh_curves_button.setToolTip("Обновить списки")
+        self.refresh_curves_button.setFixedSize(34, 30)
+        self.refresh_curves_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.refresh_curves_button.clicked.connect(lambda: self.refresh_curve_lists(show_feedback=True))
+        self.current_selector = SearchableComboBox(empty_text="Нет пресетов")
         self._configure_flexible_combo(self.current_selector, min_chars=18)
         self.current_selector.currentIndexChanged.connect(self.load_current_from_selector)
         self.compare_button = QPushButton("Сравнить")
@@ -669,13 +805,13 @@ class MainWindow(QMainWindow):
         self.export_button.clicked.connect(self.export_preset)
 
         controls.addWidget(QLabel("Устройство"))
-        controls.addWidget(self.device_curve_combo)
+        controls.addWidget(self.device_curve_combo, 1)
+        controls.addWidget(self.refresh_curves_button)
         controls.addWidget(QLabel("Текущий пресет"))
         controls.addWidget(self.current_selector, 2)
         controls.addWidget(self.compare_button)
         controls.addWidget(self.import_button)
         controls.addWidget(self.export_button)
-        controls.addStretch(1)
         layout.addLayout(controls)
         return box
 
@@ -749,29 +885,60 @@ class MainWindow(QMainWindow):
         ai_layout.setSpacing(8)
         model_controls = QHBoxLayout()
         model_controls.addWidget(QLabel("Модель"))
-        self.ai_model_combo = QComboBox()
+        self.ai_model_combo = SearchableComboBox(empty_text="Нет моделей")
         self.ai_model_combo.setMaxVisibleItems(12)
         self._configure_flexible_combo(self.ai_model_combo, min_chars=18)
         model_controls.addWidget(self.ai_model_combo, 1)
-        self.refresh_models_button = QPushButton("Обновить")
+        self.refresh_models_button = QPushButton("↻")
+        self.refresh_models_button.setToolTip("Обновить модели")
+        self.refresh_models_button.setFixedSize(34, 30)
+        self.refresh_models_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.refresh_models_button.clicked.connect(self.refresh_ai_models)
         model_controls.addWidget(self.refresh_models_button)
         self.chat_history = QTextBrowser()
         self.chat_history.setOpenExternalLinks(True)
-        self.chat_input = QTextEdit()
+        self.chat_composer = QFrame()
+        self.chat_composer.setObjectName("chatComposer")
+        composer_layout = QVBoxLayout(self.chat_composer)
+        composer_layout.setContentsMargins(4, 4, 4, 4)
+        composer_layout.setSpacing(2)
+        self.chat_input = ChatInput()
+        self.chat_input.setObjectName("chatInput")
         self.chat_input.setPlaceholderText("Например: убери гул, добавь воздуха, вокал резкий")
-        self.chat_input.setFixedHeight(96)
-        self.send_button = QPushButton("Отправить")
+        self.chat_input.setFixedHeight(76)
+        self.chat_input.submit_requested.connect(self.send_chat)
+        self.chat_menu_button = QPushButton("≡")
+        self.chat_menu_button.setObjectName("chatIconButton")
+        self.chat_menu_button.setToolTip("Сохраненные чаты")
+        self.chat_menu_button.setFixedSize(30, 30)
+        self.chat_menu = QMenu(self.chat_menu_button)
+        self.chat_menu_button.clicked.connect(self.show_chat_menu)
+        self.delete_chat_button = QPushButton("×")
+        self.delete_chat_button.setObjectName("chatIconButton")
+        self.delete_chat_button.setToolTip("Удалить текущий чат")
+        self.delete_chat_button.setFixedSize(30, 30)
+        self.delete_chat_button.clicked.connect(self.delete_current_chat)
+        self.new_chat_button = QPushButton("+")
+        self.new_chat_button.setObjectName("chatIconButton")
+        self.new_chat_button.setToolTip("Новый чат")
+        self.new_chat_button.setFixedSize(30, 30)
+        self.new_chat_button.clicked.connect(self.start_new_chat)
+        self.send_button = QPushButton("↑")
+        self.send_button.setObjectName("chatIconButton")
+        self.send_button.setToolTip("Отправить")
+        self.send_button.setFixedSize(30, 30)
         self.send_button.clicked.connect(self.send_chat)
-        self.clear_chat_button = QPushButton("Очистить")
-        self.clear_chat_button.clicked.connect(self.clear_chat)
         chat_buttons = QHBoxLayout()
-        chat_buttons.addWidget(self.send_button, 1)
-        chat_buttons.addWidget(self.clear_chat_button)
+        chat_buttons.addWidget(self.chat_menu_button)
+        chat_buttons.addWidget(self.delete_chat_button)
+        chat_buttons.addStretch(1)
+        chat_buttons.addWidget(self.new_chat_button)
+        chat_buttons.addWidget(self.send_button)
+        composer_layout.addWidget(self.chat_input)
+        composer_layout.addLayout(chat_buttons)
         ai_layout.addLayout(model_controls)
         ai_layout.addWidget(self.chat_history, 1)
-        ai_layout.addWidget(self.chat_input)
-        ai_layout.addLayout(chat_buttons)
+        ai_layout.addWidget(self.chat_composer)
         self.append_chat("AIEQ", CHAT_INTRO_TEXT)
 
         autoeq_tab = QWidget()
@@ -779,7 +946,7 @@ class MainWindow(QMainWindow):
         autoeq_layout.setContentsMargins(0, 10, 0, 0)
         autoeq_layout.setSpacing(8)
         autoeq_layout.addWidget(QLabel("Целевая кривая"))
-        self.target_curve_combo = QComboBox()
+        self.target_curve_combo = SearchableComboBox(empty_text="Нет кривых")
         self.target_curve_combo.setMaxVisibleItems(12)
         self.target_curve_combo.currentIndexChanged.connect(self.on_target_curve_changed)
         autoeq_layout.addWidget(self.target_curve_combo)
@@ -787,13 +954,10 @@ class MainWindow(QMainWindow):
         self.show_target_checkbox.toggled.connect(lambda _checked: self.update_graph())
         autoeq_layout.addWidget(self.show_target_checkbox)
         autoeq_layout.addWidget(QLabel("Алгоритм"))
-        self.autoeq_backend_combo = QComboBox()
+        self.autoeq_backend_combo = SearchableComboBox(empty_text="Нет алгоритмов")
         self.autoeq_backend_combo.addItem("dmitryz1024", "local")
         self.autoeq_backend_combo.addItem("jaakkopasanen", "official")
         autoeq_layout.addWidget(self.autoeq_backend_combo)
-        self.refresh_curves_button = QPushButton("Обновить списки")
-        self.refresh_curves_button.clicked.connect(lambda: self.refresh_curve_lists(show_feedback=True))
-        autoeq_layout.addWidget(self.refresh_curves_button)
         self.run_autoeq_button = QPushButton("Рассчитать AutoEQ")
         self.run_autoeq_button.clicked.connect(self.run_autoeq)
         autoeq_layout.addWidget(self.run_autoeq_button)
@@ -830,6 +994,10 @@ class MainWindow(QMainWindow):
                 border: 1px solid #3a414d;
                 border-radius: 6px;
                 padding: 7px 11px;
+                outline: none;
+            }
+            QPushButton:focus, QComboBox:focus, QDoubleSpinBox:focus, QTextEdit:focus {
+                outline: none;
             }
             QPushButton:hover {
                 background: #2d3440;
@@ -872,6 +1040,22 @@ class MainWindow(QMainWindow):
                 min-height: 20px;
                 max-height: 30px;
             }
+            QPushButton#chatIconButton {
+                background: transparent;
+                border: 0;
+                color: #9aa4b2;
+                font-size: 20px;
+                font-weight: 600;
+                padding: 0;
+            }
+            QPushButton#chatIconButton:hover {
+                color: #f5fbff;
+                background: transparent;
+            }
+            QPushButton#chatIconButton:disabled {
+                color: #4e5664;
+                background: transparent;
+            }
             QPushButton#compareButton::menu-indicator {
                 subcontrol-origin: padding;
                 subcontrol-position: center right;
@@ -881,6 +1065,21 @@ class MainWindow(QMainWindow):
                 background: #111318;
                 border: 1px solid #313640;
                 border-radius: 6px;
+                padding: 5px;
+                selection-background-color: #05e5b6;
+                outline: none;
+            }
+            QDoubleSpinBox {
+                padding: 5px;
+            }
+            QFrame#chatComposer {
+                background: #111318;
+                border: 1px solid #313640;
+                border-radius: 6px;
+            }
+            QTextEdit#chatInput {
+                background: transparent;
+                border: 0;
                 padding: 5px;
                 selection-background-color: #05e5b6;
             }
@@ -975,6 +1174,26 @@ class MainWindow(QMainWindow):
             QMenu::item:selected {
                 background: #2d3440;
             }
+            QMenu#searchPopup {
+                padding: 0;
+            }
+            QLineEdit#comboSearch, QListWidget#comboSearchList {
+                background: #111318;
+                border: 1px solid #313640;
+                border-radius: 6px;
+                padding: 5px;
+                selection-background-color: #05e5b6;
+                outline: none;
+            }
+            QListWidget#comboSearchList::item {
+                padding: 6px 8px;
+            }
+            QListWidget#comboSearchList::item:selected {
+                background: #2d3440;
+            }
+            QListWidget#comboSearchList::item:disabled {
+                color: #707987;
+            }
             """
         )
 
@@ -985,6 +1204,8 @@ class MainWindow(QMainWindow):
         self.refresh_devices_button.setEnabled(True)
         previous_input = self.input_combo.currentData()
         previous_output = self.output_combo.currentData()
+        self.input_combo.blockSignals(True)
+        self.output_combo.blockSignals(True)
         self.input_combo.clear()
         self.output_combo.clear()
         try:
@@ -993,7 +1214,11 @@ class MainWindow(QMainWindow):
             self.input_devices = list_audio_devices("input")
             self.output_devices = list_audio_devices("output")
         except Exception as exc:  # noqa: BLE001
-            self.status_label.setText(f"sounddevice недоступен: {exc}")
+            self.input_combo.blockSignals(False)
+            self.output_combo.blockSignals(False)
+            self.status_label.setToolTip(str(exc))
+            self.update_audio_latency_label()
+            self.show_toast("sounddevice недоступен")
             self.audio_button.setEnabled(False)
             self.refresh_devices_button.setEnabled(True)
             return
@@ -1005,10 +1230,14 @@ class MainWindow(QMainWindow):
 
         self._restore_combo_data(self.input_combo, previous_input)
         self._restore_combo_data(self.output_combo, previous_output)
+        self.input_combo.blockSignals(False)
+        self.output_combo.blockSignals(False)
+        self.refresh_audio_settings()
 
         self.audio_button.setEnabled(bool(self.input_devices and self.output_devices))
         self.refresh_devices_button.setEnabled(True)
-        self.status_label.setText("Аудио остановлено")
+        self.status_label.setToolTip("")
+        self.update_audio_latency_label()
 
     def _restore_combo_data(self, combo: QComboBox, value: object) -> None:
         if value is None:
@@ -1016,6 +1245,68 @@ class MainWindow(QMainWindow):
         index = combo.findData(value)
         if index >= 0:
             combo.setCurrentIndex(index)
+
+    def refresh_audio_settings(self, _index: int | None = None) -> None:
+        if not hasattr(self, "sample_rate_combo"):
+            return
+        previous_rate = self.sample_rate_combo.currentData()
+        previous_dtype = self.audio_dtype_combo.currentData()
+        input_device = self._selected_device(self.input_combo, self.input_devices)
+        output_device = self._selected_device(self.output_combo, self.output_devices)
+        self.sample_rate_combo.blockSignals(True)
+        self.audio_dtype_combo.blockSignals(True)
+        self.sample_rate_combo.clear()
+        self.audio_dtype_combo.clear()
+        self.audio_settings = []
+        if input_device is None or output_device is None:
+            self.sample_rate_combo.setEnabled(False)
+            self.audio_dtype_combo.setEnabled(False)
+            self.sample_rate_combo.blockSignals(False)
+            self.audio_dtype_combo.blockSignals(False)
+            return
+        try:
+            self.audio_settings = list_supported_stream_settings(input_device, output_device)
+        except Exception:  # noqa: BLE001 - start will surface the real audio error if needed.
+            fallback_rate = int(output_device.default_samplerate or input_device.default_samplerate or DEFAULT_SAMPLE_RATE)
+            self.audio_settings = [AudioStreamSetting(fallback_rate, "float32")]
+
+        rates = sorted({setting.sample_rate for setting in self.audio_settings})
+        for rate in rates:
+            self.sample_rate_combo.addItem(str(rate), rate)
+        wanted_rate = previous_rate if previous_rate in rates else int(output_device.default_samplerate or rates[0])
+        self._restore_combo_data(self.sample_rate_combo, wanted_rate)
+        if self.sample_rate_combo.currentIndex() < 0 and self.sample_rate_combo.count():
+            self.sample_rate_combo.setCurrentIndex(0)
+        self.sample_rate_combo.blockSignals(False)
+        self.audio_dtype_combo.blockSignals(False)
+        self.refresh_audio_dtype_options(previous_dtype=previous_dtype)
+        enabled = not self.audio_engine.is_running
+        self.sample_rate_combo.setEnabled(enabled and self.sample_rate_combo.count() > 0)
+        self.audio_dtype_combo.setEnabled(enabled and self.audio_dtype_combo.count() > 0)
+
+    def refresh_audio_dtype_options(self, _index: int | None = None, *, previous_dtype: object | None = None) -> None:
+        if not hasattr(self, "audio_dtype_combo"):
+            return
+        if previous_dtype is None:
+            previous_dtype = self.audio_dtype_combo.currentData()
+        selected_rate = self.sample_rate_combo.currentData()
+        self.audio_dtype_combo.blockSignals(True)
+        self.audio_dtype_combo.clear()
+        for setting in self.audio_settings:
+            if setting.sample_rate == selected_rate:
+                self.audio_dtype_combo.addItem(setting.dtype_label, setting.dtype)
+        self._restore_combo_data(self.audio_dtype_combo, previous_dtype)
+        if self.audio_dtype_combo.currentIndex() < 0 and self.audio_dtype_combo.count():
+            self.audio_dtype_combo.setCurrentIndex(0)
+        self.audio_dtype_combo.blockSignals(False)
+
+    def selected_sample_rate(self) -> int:
+        value = self.sample_rate_combo.currentData() if hasattr(self, "sample_rate_combo") else None
+        return int(value or DEFAULT_SAMPLE_RATE)
+
+    def selected_audio_dtype(self) -> str:
+        value = self.audio_dtype_combo.currentData() if hasattr(self, "audio_dtype_combo") else None
+        return str(value or "float32")
 
     def refresh_ai_models(self) -> None:
         if not hasattr(self, "ai_model_combo"):
@@ -1517,18 +1808,33 @@ class MainWindow(QMainWindow):
         self.show_toast("AutoEQ применен")
 
     def set_audio_running_ui(self, running: bool) -> None:
-        self.audio_button.setText("Стоп" if running else "Старт")
+        self.audio_button.setText("■" if running else "▶")
+        self.audio_button.setToolTip("Стоп" if running else "Старт")
         self.audio_button.setProperty("running", running)
         self.audio_button.style().unpolish(self.audio_button)
         self.audio_button.style().polish(self.audio_button)
         self.audio_button.update()
         self.refresh_devices_button.setEnabled(not running)
+        self.input_combo.setEnabled(not running)
+        self.output_combo.setEnabled(not running)
+        self.sample_rate_combo.setEnabled(not running and self.sample_rate_combo.count() > 0)
+        self.audio_dtype_combo.setEnabled(not running and self.audio_dtype_combo.count() > 0)
+
+    def update_audio_latency_label(self) -> None:
+        latency_ms = self.audio_engine.output_latency_ms
+        if latency_ms is None:
+            self.status_label.setText("--")
+            self.status_label.adjustSize()
+            return
+        self.status_label.setText(f"{latency_ms:.1f} ms")
+        self.status_label.adjustSize()
 
     def toggle_audio(self) -> None:
         if self.audio_engine.is_running:
             self.audio_engine.stop()
+            self.audio_latency_timer.stop()
             self.set_audio_running_ui(False)
-            self.status_label.setText("Аудио остановлено")
+            self.update_audio_latency_label()
             return
 
         input_device = self._selected_device(self.input_combo, self.input_devices)
@@ -1537,12 +1843,21 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Аудио", "Выберите вход и выход.")
             return
         try:
-            self.audio_engine.start(input_device, output_device, self.current_preset)
+            self.audio_engine.start(
+                input_device,
+                output_device,
+                self.current_preset,
+                sample_rate=self.selected_sample_rate(),
+                dtype=self.selected_audio_dtype(),
+            )
             self.set_audio_running_ui(True)
-            self.status_label.setText(f"{int(self.audio_engine.sample_rate)} Hz, block {self.audio_engine.block_size}")
+            self.update_audio_latency_label()
+            self.audio_latency_timer.start(1000)
         except Exception as exc:  # noqa: BLE001
             self.audio_engine.stop()
+            self.audio_latency_timer.stop()
             self.set_audio_running_ui(False)
+            self.update_audio_latency_label()
             QMessageBox.critical(self, "Аудио", f"Не удалось запустить поток:\n{exc}")
 
     def _selected_device(self, combo: QComboBox, devices: list[AudioDevice]) -> AudioDevice | None:
@@ -1557,14 +1872,151 @@ class MainWindow(QMainWindow):
         color = CURRENT_COLOR if author != "Вы" else USER_CHAT_COLOR
         self.chat_history.append(f'<p><b style="color:{color}">{author}</b><br>{safe}</p>')
 
-    def clear_chat(self) -> None:
+    def show_chat_menu(self) -> None:
+        self.refresh_chat_sessions()
+        self.chat_menu.exec(self.chat_menu_button.mapToGlobal(self.chat_menu_button.rect().bottomLeft()))
+
+    def refresh_chat_sessions(self) -> None:
+        if not hasattr(self, "chat_menu"):
+            return
+        self.chat_sessions = self.chat_store.list_sessions()
+        self.chat_menu.clear()
+        if not self.chat_sessions:
+            action = QAction("Сохраненных чатов нет", self.chat_menu)
+            action.setEnabled(False)
+            self.chat_menu.addAction(action)
+            return
+        for session in self.chat_sessions:
+            action = QAction(session.title, self.chat_menu)
+            action.setCheckable(True)
+            action.setChecked(session.id == self.current_chat_id)
+            action.triggered.connect(lambda _checked=False, chat_id=session.id: self.load_chat_session(chat_id))
+            self.chat_menu.addAction(action)
+
+    def restore_chat_session(self) -> None:
+        last_id = self.settings.value("ai/current_chat_id", None)
+        try:
+            chat_id = int(last_id) if last_id is not None else None
+        except (TypeError, ValueError):
+            chat_id = None
+        if chat_id is not None and self.chat_store.get_session(chat_id) is not None:
+            self.load_chat_session(chat_id, show_feedback=False)
+            return
+        if self.chat_sessions:
+            self.load_chat_session(self.chat_sessions[0].id, show_feedback=False)
+        else:
+            self.render_chat_messages()
+
+    def load_chat_session(self, chat_id: int | None, *, show_feedback: bool = True) -> None:
+        if self._ai_thread is not None and self._ai_thread.isRunning():
+            self.show_toast("ИИ-агент еще отвечает")
+            return
+        if chat_id is None:
+            self.start_new_chat(show_feedback=show_feedback)
+            return
+        session = self.chat_store.get_session(chat_id)
+        if session is None:
+            self.show_toast("Чат не найден")
+            self.refresh_chat_sessions()
+            return
+        self.ai_service.clear_context()
+        self.current_chat_id = session.id
+        self.current_chat_context_full = session.context_full
+        self.chat_messages = list(session.messages)
+        self.settings.setValue("ai/current_chat_id", self.current_chat_id)
+        self.render_chat_messages()
+        self.refresh_chat_sessions()
+        if show_feedback:
+            self.show_toast("Чат открыт")
+
+    def start_new_chat(self, *, show_feedback: bool = True) -> None:
         if self._ai_thread is not None and self._ai_thread.isRunning():
             self.show_toast("ИИ-агент еще отвечает")
             return
         self.ai_service.clear_context()
-        self.chat_messages.clear()
+        self.current_chat_id = None
+        self.current_chat_context_full = False
+        self.chat_messages = []
+        self.settings.remove("ai/current_chat_id")
+        self.render_chat_messages()
+        self.refresh_chat_sessions()
+        if show_feedback:
+            self.show_toast("Новый чат")
+
+    def delete_current_chat(self) -> None:
+        if self._ai_thread is not None and self._ai_thread.isRunning():
+            self.show_toast("ИИ-агент еще отвечает")
+            return
+        if self.current_chat_id is None:
+            self.start_new_chat()
+            return
+        answer = QMessageBox.question(
+            self,
+            "Удалить чат",
+            "Удалить текущий чат?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.chat_store.delete(self.current_chat_id)
+        self.show_toast("Чат удален")
+        self.start_new_chat(show_feedback=False)
+
+    def render_chat_messages(self) -> None:
         self.chat_history.clear()
         self.append_chat("AIEQ", CHAT_INTRO_TEXT)
+        for message in self.chat_messages:
+            author = "Вы" if message.get("role") == "user" else "AIEQ"
+            self.append_chat(author, str(message.get("content", "")))
+        self.update_chat_context_state()
+
+    def ensure_current_chat(self, first_user_text: str) -> None:
+        if self.current_chat_id is not None:
+            return
+        session = self.chat_store.save_new(chat_title_from_first_user_message(first_user_text), [])
+        self.current_chat_id = session.id
+        self.current_chat_context_full = False
+        self.settings.setValue("ai/current_chat_id", self.current_chat_id)
+        self.refresh_chat_sessions()
+
+    def save_current_chat(self) -> None:
+        if self.current_chat_id is None:
+            return
+        session = ChatSession(
+            id=self.current_chat_id,
+            title=self.current_chat_title(),
+            messages=list(self.chat_messages),
+            context_full=self.current_chat_context_full,
+        )
+        self.chat_store.update(session)
+        self.refresh_chat_sessions()
+
+    def current_chat_title(self) -> str:
+        if self.current_chat_id is not None:
+            for session in self.chat_sessions:
+                if session.id == self.current_chat_id:
+                    return session.title
+        for message in self.chat_messages:
+            if message.get("role") == "user":
+                return chat_title_from_first_user_message(str(message.get("content", "")))
+        return chat_title_from_first_user_message("")
+
+    def mark_current_chat_context_full(self) -> None:
+        self.current_chat_context_full = True
+        self.save_current_chat()
+        self.update_chat_context_state()
+        self.show_toast("Контекст чата заполнен", timeout_ms=4200)
+
+    def update_chat_context_state(self) -> None:
+        running = self._ai_thread is not None and self._ai_thread.isRunning()
+        blocked = self.current_chat_context_full
+        self.chat_input.setEnabled(not blocked)
+        self.send_button.setEnabled(not blocked and not running)
+        if blocked:
+            self.chat_input.setPlaceholderText("Контекст этого чата заполнен. Создайте новый чат или откройте другой.")
+        else:
+            self.chat_input.setPlaceholderText("Например: убери гул, добавь воздуха, вокал резкий")
 
     def show_toast(self, text: str, timeout_ms: int = 2200) -> None:
         self.toast_label.setText(text)
@@ -1636,14 +2088,20 @@ class MainWindow(QMainWindow):
         text = self.chat_input.toPlainText().strip()
         if not text:
             return
+        if self.current_chat_context_full:
+            self.show_toast("Контекст чата заполнен", timeout_ms=4200)
+            self.update_chat_context_state()
+            return
         if self._ai_thread is not None and self._ai_thread.isRunning():
             self.show_toast("ИИ-агент еще отвечает")
             return
+        history_for_model = list(self.chat_messages)
+        self.ensure_current_chat(text)
         self.chat_input.clear()
         self.send_button.setEnabled(False)
-        self.send_button.setText("Думаю...")
         self.append_chat("Вы", text)
         self.chat_messages.append({"role": "user", "content": text})
+        self.save_current_chat()
         self.show_toast("ИИ-агент думает")
 
         self._ai_thread = QThread(self)
@@ -1654,7 +2112,7 @@ class MainWindow(QMainWindow):
             saved_presets=[preset.clone(keep_id=True) for preset in self.saved_presets],
             model_path=self.selected_ai_model_path(),
             device_curve=self.selected_device_curve,
-            chat_history=list(self.chat_messages),
+            chat_history=history_for_model,
         )
         self._ai_worker.moveToThread(self._ai_thread)
         self._ai_thread.started.connect(self._ai_worker.run)
@@ -1668,8 +2126,12 @@ class MainWindow(QMainWindow):
     def on_ai_finished(self, result: AiPresetResult) -> None:
         if result.preset is None:
             self.append_chat("AIEQ", result.assistant_message)
-            self.send_button.setEnabled(True)
-            self.send_button.setText("Отправить")
+            self.chat_messages.append({"role": "assistant", "content": result.assistant_message})
+            if result.raw_json and self.ai_service.is_context_limit_message(result.raw_json):
+                self.mark_current_chat_context_full()
+            else:
+                self.save_current_chat()
+                self.send_button.setEnabled(not self.current_chat_context_full)
             return
         saved = self.save_generated_preset(result.preset, name=self.ai_preset_name())
         self.current_preset = saved.clone(keep_id=True)
@@ -1678,10 +2140,11 @@ class MainWindow(QMainWindow):
         self.append_chat("AIEQ", result.assistant_message)
         self.chat_messages.append({"role": "assistant", "content": result.assistant_message})
         self.show_toast("Пресет применен")
-        self.send_button.setEnabled(True)
-        self.send_button.setText("Отправить")
+        self.save_current_chat()
+        self.send_button.setEnabled(not self.current_chat_context_full)
         self.apply_audio_preset()
 
     def on_ai_thread_finished(self) -> None:
         self._ai_thread = None
         self._ai_worker = None
+        self.update_chat_context_state()

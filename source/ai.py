@@ -14,7 +14,6 @@ from typing import Any
 
 from .config import load_env_file
 from .curves import FrequencyCurve
-from .eq_intent import try_build_intent_preset
 from .models import Preset
 
 AI_SCHEMA: dict[str, Any] = {
@@ -46,7 +45,7 @@ AI_SCHEMA: dict[str, Any] = {
 
 SYSTEM_PROMPT = """
 You are an expert parametric equalizer assistant for a Windows prototype.
-Return only structured JSON matching the requested schema.
+Think carefully before answering, but return only structured JSON matching the requested schema.
 The application combines overlapping filters with envelope mixing, not cascade summing.
 Therefore avoid stacking many similar filters on the same frequency range; choose decisive bands.
 Use these filter types only: peaking, low_shelf, high_shelf, low_pass, high_pass, band_pass, notch.
@@ -54,6 +53,13 @@ Keep most musical changes within +/-6 dB unless the user asks for a radical effe
 Use Q around 0.6-1.0 for broad tone, 1.0-2.5 for focused tone, 4.0-10.0 for resonance/notch work.
 If the user gives explicit frequency, gain, or Q values, follow those values unless they are unsafe or outside limits.
 Frequencies are in Hz. Preserve useful existing filters and produce a complete new preset.
+For exact requests, include filters that match the requested frequencies, gains, and Q values as closely as possible.
+For vague requests, infer a tasteful complete tonal profile: 3-7 enabled filters is usually enough.
+Use broad shelves and broad peaking filters for musical tone shaping; use narrow filters only for resonances,
+harshness, boxiness, sibilance, rumble, or hum. Avoid low_pass/high_pass unless the user asks for a cutoff effect.
+If the user asks for a common style, translate it into a concrete EQ curve:
+soft/smooth = less 2.5-6 kHz harshness and controlled air; warm = low-mid body without muddy bass;
+V-shaped/media = bass and air lift with controlled mids; clear/vocal = less mud and more presence without sharpness.
 You can use referenced_preset only when the user explicitly asks to modify or reuse that preset.
 If referenced_preset is null, do not copy any saved preset. Create a fresh preset from the user request,
 the current preset, current_device, and conversation_history. If referenced_preset is present, treat it as
@@ -61,6 +67,7 @@ the explicit starting point, but still make the requested changes instead of ret
 Never return current_preset or referenced_preset unchanged as your answer.
 Use current_device as the measured response of the selected playback device. If current_device.raw_txt is available,
 treat it as the source-of-truth frequency response data and compensate with respect to that curve.
+First compensate obvious current_device problems, then apply the user's taste request on top of that.
 Respond in Russian in assistant_message. Make assistant_message a brief 1-2 sentence summary of the decisions,
 without listing filter parameters or describing every filter.
 """.strip()
@@ -68,7 +75,10 @@ without listing filter parameters or describing every filter.
 NOT_CONNECTED_MESSAGE = "Ваш ИИ-агент не подключен"
 MODELS_DIR = Path("models")
 MODEL_EXTENSIONS = (".gguf",)
-DEFAULT_LLAMA_N_CTX = 8192
+DEFAULT_LLAMA_N_CTX = 12288
+DEFAULT_LLAMA_N_THREADS = min(8, max(1, os.cpu_count() or 8))
+DEFAULT_LLAMA_MAX_TOKENS = 2048
+DEFAULT_LLAMA_TEMPERATURE = 0.35
 MAX_SAVED_PRESET_FILTERS = 14
 MAX_DEVICE_POINTS = 48
 COMPACT_SAVED_PRESET_FILTERS = 10
@@ -104,11 +114,11 @@ class AiEqualizerService:
         self.openai_model = "gpt-5.2"
         self.llama_model_path = Path("models/Qwen3-4B-Q4_K_M.gguf")
         self.llama_n_ctx = DEFAULT_LLAMA_N_CTX
-        self.llama_n_threads = max(1, (os.cpu_count() or 6) - 1)
+        self.llama_n_threads = DEFAULT_LLAMA_N_THREADS
         self.llama_n_gpu_layers = -1
-        self.llama_n_batch = 512
-        self.llama_max_tokens = 900
-        self.llama_temperature = 0.2
+        self.llama_n_batch = 1024
+        self.llama_max_tokens = DEFAULT_LLAMA_MAX_TOKENS
+        self.llama_temperature = DEFAULT_LLAMA_TEMPERATURE
         self.llama_server_path = Path("runtime/llama.cpp/llama-server.exe")
         self.llama_server_host = "127.0.0.1"
         self.llama_server_port = 8080
@@ -117,7 +127,9 @@ class AiEqualizerService:
         self.llama_server_device = "auto"
         self.llama_server_parallel = 1
         self.llama_server_flash_attn = "on"
-        self.llama_server_reasoning = "off"
+        self.llama_server_reasoning = "auto"
+        self.llama_server_reasoning_format = "deepseek"
+        self.llama_server_reasoning_budget = 1024
         self.llama_server_cache_ram = 0
         self.llama_server_require_gpu = False
         self.llama_server_extra_args = ""
@@ -137,11 +149,11 @@ class AiEqualizerService:
             os.environ.get("AIEQ_LLAMA_MODEL_PATH", "models/Qwen3-4B-Q4_K_M.gguf")
         ).expanduser()
         self.llama_n_ctx = self._env_int("AIEQ_LLAMA_N_CTX", DEFAULT_LLAMA_N_CTX)
-        self.llama_n_threads = self._env_int("AIEQ_LLAMA_N_THREADS", max(1, (os.cpu_count() or 6) - 1))
+        self.llama_n_threads = self._env_int("AIEQ_LLAMA_N_THREADS", DEFAULT_LLAMA_N_THREADS)
         self.llama_n_gpu_layers = self._env_int("AIEQ_LLAMA_N_GPU_LAYERS", -1)
-        self.llama_n_batch = self._env_int("AIEQ_LLAMA_N_BATCH", 512)
-        self.llama_max_tokens = self._env_int("AIEQ_LLAMA_MAX_TOKENS", 900)
-        self.llama_temperature = self._env_float("AIEQ_LLAMA_TEMPERATURE", 0.2)
+        self.llama_n_batch = self._env_int("AIEQ_LLAMA_N_BATCH", 1024)
+        self.llama_max_tokens = self._env_int("AIEQ_LLAMA_MAX_TOKENS", DEFAULT_LLAMA_MAX_TOKENS)
+        self.llama_temperature = self._env_float("AIEQ_LLAMA_TEMPERATURE", DEFAULT_LLAMA_TEMPERATURE)
         self.llama_server_path = Path(
             os.environ.get("AIEQ_LLAMA_SERVER_PATH", "runtime/llama.cpp/llama-server.exe")
         ).expanduser()
@@ -152,7 +164,9 @@ class AiEqualizerService:
         self.llama_server_device = os.environ.get("AIEQ_LLAMA_SERVER_DEVICE", "auto").strip() or "auto"
         self.llama_server_parallel = max(1, self._env_int("AIEQ_LLAMA_SERVER_PARALLEL", 1))
         self.llama_server_flash_attn = os.environ.get("AIEQ_LLAMA_SERVER_FLASH_ATTN", "on").strip()
-        self.llama_server_reasoning = os.environ.get("AIEQ_LLAMA_SERVER_REASONING", "off").strip()
+        self.llama_server_reasoning = os.environ.get("AIEQ_LLAMA_SERVER_REASONING", "auto").strip()
+        self.llama_server_reasoning_format = os.environ.get("AIEQ_LLAMA_SERVER_REASONING_FORMAT", "deepseek").strip()
+        self.llama_server_reasoning_budget = self._env_int("AIEQ_LLAMA_SERVER_REASONING_BUDGET", 1024)
         self.llama_server_cache_ram = self._env_int("AIEQ_LLAMA_SERVER_CACHE_RAM", 0)
         self.llama_server_require_gpu = self._env_bool("AIEQ_LLAMA_SERVER_REQUIRE_GPU", False)
         self.llama_server_extra_args = os.environ.get("AIEQ_LLAMA_SERVER_EXTRA_ARGS", "").strip()
@@ -172,15 +186,6 @@ class AiEqualizerService:
         self._refresh_config()
         if self.provider == "none":
             return self._not_connected()
-        intent = try_build_intent_preset(user_text, current_preset, saved_presets)
-        if intent is not None:
-            return AiPresetResult(
-                preset=intent.preset,
-                assistant_message=intent.assistant_message,
-                used_model="rules",
-                connected=True,
-                raw_json=None,
-            )
         if self.provider in {"llama_server", "llama-server", "server"}:
             return self._suggest_with_llama_server(
                 user_text,
@@ -400,13 +405,25 @@ class AiEqualizerService:
             self.llama_server_host,
             "--port",
             str(self.llama_server_port),
+            "--threads-http",
+            "3",
+            "--timeout",
+            "600",
+            "--no-webui",
+            "--log-timestamps",
+            "--log-prefix",
         ]
         if self.llama_server_device and self.llama_server_device.casefold() != "auto":
             args.extend(["--device", self.llama_server_device])
         if self.llama_server_flash_attn:
             args.extend(["-fa", self.llama_server_flash_attn])
+        reasoning_mode = self.llama_server_reasoning.casefold()
         if self.llama_server_reasoning:
             args.extend(["-rea", self.llama_server_reasoning])
+        if reasoning_mode != "off" and self.llama_server_reasoning_format:
+            args.extend(["--reasoning-format", self.llama_server_reasoning_format])
+        if reasoning_mode != "off" and self.llama_server_reasoning_budget >= 0:
+            args.extend(["--reasoning-budget", str(self.llama_server_reasoning_budget)])
         if self.llama_server_cache_ram >= 0:
             args.extend(["--cache-ram", str(self.llama_server_cache_ram)])
         if self.llama_server_extra_args:
@@ -663,7 +680,8 @@ class AiEqualizerService:
                 "content": (
                     "Return compact JSON only with keys: assistant_message, filters. "
                     "Every filter must contain type, freq, q, gain, enabled. "
-                    "assistant_message must summarize the tonal intent only, with no per-filter values.\n\n"
+                    "assistant_message must summarize the tonal intent only, with no per-filter values. "
+                    "Do not put reasoning, markdown, comments, or prose outside the JSON object.\n\n"
                     f"Input:\n{json.dumps(payload, ensure_ascii=False)}"
                 ),
             },
@@ -835,14 +853,35 @@ class AiEqualizerService:
             except Exception:  # noqa: BLE001 - context clearing is best effort.
                 pass
 
+    def shutdown(self) -> None:
+        self.clear_context()
+        process = self._llama_server_process
+        self._llama_server_process = None
+        if process is not None and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5.0)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5.0)
+        log_file = self._llama_server_log_file
+        self._llama_server_log_file = None
+        if log_file is not None and not log_file.closed:
+            log_file.close()
+
     @staticmethod
     def _is_context_limit_error(exc: Exception) -> bool:
-        message = str(exc).casefold()
+        return AiEqualizerService.is_context_limit_message(str(exc))
+
+    @staticmethod
+    def is_context_limit_message(message: str) -> bool:
+        message = message.casefold()
         return (
             "exceed context" in message
             or "context window" in message
             or "requested tokens" in message
             or "n_ctx" in message
+            or "context limit" in message
         )
 
     def _serialize_referenced_preset(self, presets: list[Preset] | None, user_text: str) -> dict[str, Any] | None:

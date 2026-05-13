@@ -113,6 +113,62 @@ def test_clear_context_unloads_llama_instance() -> None:
     assert service._llama_signature is None
 
 
+def test_shutdown_stops_owned_llama_server() -> None:
+    class FakeProcess:
+        def __init__(self) -> None:
+            self.terminated = False
+            self.killed = False
+
+        def poll(self) -> int | None:
+            return None
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+        def kill(self) -> None:
+            self.killed = True
+
+        def wait(self, timeout: float) -> int:
+            return 0
+
+    class FakeLog:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    process = FakeProcess()
+    log = FakeLog()
+    service = AiEqualizerService()
+    service._llama_server_process = process
+    service._llama_server_log_file = log
+    service.shutdown()
+    assert process.terminated is True
+    assert process.killed is False
+    assert log.closed is True
+    assert service._llama_server_process is None
+    assert service._llama_server_log_file is None
+
+
+def test_llama_server_request_uses_quality_defaults(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    service = AiEqualizerService()
+
+    def fake_http(method: str, url: str, *, data: dict | None = None, timeout: float) -> dict:
+        captured.update(data or {})
+        return {"choices": [{"message": {"content": "{}"}}]}
+
+    monkeypatch.setattr(service, "_http_json", fake_http)
+    service._llama_server_chat_json([{"role": "user", "content": "test"}], Path("model.gguf"))
+    assert captured["temperature"] == 0.35
+    assert captured["max_tokens"] == 2048
+    assert "top_p" not in captured
+    assert "top_k" not in captured
+    assert "min_p" not in captured
+    assert "repeat_penalty" not in captured
+
+
 def test_only_mentioned_saved_preset_enters_context() -> None:
     presets = [
         Preset("Warm", [EqFilter("peaking", 1000, 1, 1)]),
@@ -149,17 +205,6 @@ def test_chat_history_enters_llama_payload() -> None:
 
 def test_context_limit_errors_are_detected() -> None:
     assert AiEqualizerService._is_context_limit_error(RuntimeError("Requested tokens exceed context window"))
-
-
-def test_exact_intent_bypasses_missing_model(monkeypatch) -> None:
-    monkeypatch.setenv("AIEQ_AI_PROVIDER", "llama_cpp")
-    monkeypatch.setenv("AIEQ_LLAMA_MODEL_PATH", "missing-test-model.gguf")
-    result = AiEqualizerService().suggest_preset("добавь широкий подъем на 3 дб с центром 2000 гц", flat_preset())
-    assert result.connected is True
-    assert result.used_model == "rules"
-    assert result.preset is not None
-    assert result.preset.filters[-1].freq == 2000
-    assert result.preset.filters[-1].gain == 3
 
 
 def test_auto_provider_tries_llama_server_before_llama_cpp(monkeypatch) -> None:
@@ -222,4 +267,19 @@ def test_llama_server_args_prefer_single_cuda_slot(monkeypatch, tmp_path) -> Non
     assert args[args.index("--device") + 1] == "CUDA0"
     assert args[args.index("-fa") + 1] == "on"
     assert args[args.index("-rea") + 1] == "off"
+    assert "--reasoning-format" not in args
+    assert "--reasoning-budget" not in args
     assert args[args.index("--cache-ram") + 1] == "0"
+    assert "--no-webui" in args
+
+
+def test_llama_server_args_enable_reasoning_by_default(tmp_path) -> None:
+    server = tmp_path / "llama-server.exe"
+    model = tmp_path / "Qwen3-4B-Q4_K_M.gguf"
+    server.write_text("", encoding="utf-8")
+    model.write_text("", encoding="utf-8")
+
+    args = AiEqualizerService()._llama_server_args(server, model)
+    assert args[args.index("-rea") + 1] == "auto"
+    assert args[args.index("--reasoning-format") + 1] == "deepseek"
+    assert args[args.index("--reasoning-budget") + 1] == "1024"

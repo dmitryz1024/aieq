@@ -56,7 +56,9 @@ AIEQ_LLAMA_SERVER_DEVICE=CUDA0
 AIEQ_LLAMA_SERVER_REQUIRE_GPU=1
 AIEQ_LLAMA_SERVER_PARALLEL=1
 AIEQ_LLAMA_SERVER_FLASH_ATTN=on
-AIEQ_LLAMA_SERVER_REASONING=off
+AIEQ_LLAMA_SERVER_REASONING=auto
+AIEQ_LLAMA_SERVER_REASONING_FORMAT=deepseek
+AIEQ_LLAMA_SERVER_REASONING_BUDGET=1024
 AIEQ_LLAMA_SERVER_CACHE_RAM=0
 AIEQ_LLAMA_SERVER_LOG_PATH=
 ```
@@ -81,7 +83,8 @@ GPU offload управляется из `.env`:
 
 ```ini
 AIEQ_LLAMA_N_GPU_LAYERS=-1
-AIEQ_LLAMA_N_BATCH=512
+AIEQ_LLAMA_N_BATCH=1024
+AIEQ_LLAMA_SERVER_REASONING=auto
 ```
 
 `-1` означает попытку выгрузить на GPU все слои. Если 4 ГБ VRAM не хватит, поставьте меньшее значение, например `20` или `28`.
@@ -103,18 +106,25 @@ models/Qwen3-4B-Q4_K_M.gguf
 ```ini
 AIEQ_AI_PROVIDER=auto
 AIEQ_LLAMA_MODEL_PATH=models/Qwen3-4B-Q4_K_M.gguf
-AIEQ_LLAMA_N_CTX=8192
-AIEQ_LLAMA_N_THREADS=7
+AIEQ_LLAMA_N_CTX=12288
+AIEQ_LLAMA_N_THREADS=8
 AIEQ_LLAMA_N_GPU_LAYERS=-1
-AIEQ_LLAMA_N_BATCH=512
+AIEQ_LLAMA_N_BATCH=1024
+AIEQ_LLAMA_MAX_TOKENS=2048
+AIEQ_LLAMA_TEMPERATURE=0.35
+AIEQ_AUDIO_BLOCK_SIZE=0
+AIEQ_AUDIO_LATENCY=50ms
 AIEQ_LLAMA_SERVER_PATH=runtime/llama.cpp/llama-server.exe
 AIEQ_LLAMA_SERVER_DEVICE=CUDA0
 AIEQ_LLAMA_SERVER_REQUIRE_GPU=1
 AIEQ_LLAMA_SERVER_PARALLEL=1
+AIEQ_LLAMA_SERVER_REASONING=auto
+AIEQ_LLAMA_SERVER_REASONING_FORMAT=deepseek
+AIEQ_LLAMA_SERVER_REASONING_BUDGET=1024
 AIEQ_AUTOEQ_BACKEND=auto
 ```
 
-Точные EQ-команды вроде `добавь широкий подъем на 3 дб с центром 2000 гц` обрабатываются локальным rule-based парсером до обращения к модели. Это делает точные частоты/дБ надежными даже без GPU.
+AI-вкладка не использует ручные шаблоны пресетов: все содержательные изменения АЧХ формируются подключенной моделью.
 
 Если модель не подключена, чат покажет: `Ваш ИИ-агент не подключен`.
 
@@ -131,14 +141,41 @@ uv run python -m source
 3. В AIEQ выберите реальные наушники/колонки как выход.
 4. Нажмите `Старт`.
 
+Для меньшей задержки приложение по умолчанию запускает поток с
+`AIEQ_AUDIO_LATENCY=50ms` и `AIEQ_AUDIO_BLOCK_SIZE=0`, чтобы попросить у
+PortAudio более короткий буфер. Если драйвер откажется открыть такой поток,
+приложение автоматически откатится на `low`. Если появится треск, поставьте
+`AIEQ_AUDIO_LATENCY=low` или `AIEQ_AUDIO_BLOCK_SIZE=256`.
+
+Если в AIEQ доступна только одна частота дискретизации, проверьте пару устройств
+вне приложения:
+
+```powershell
+uv run python scripts/check_audio_formats.py --input "CABLE Output" --output "название выхода"
+```
+
+Скрипт покажет, какие частоты отдельно принимает вход, отдельно выход и какие
+варианты проходят именно как full-duplex пара. Если 192000 есть в Windows, но не
+проходит как full-duplex пара, обычно нужно выбрать WASAPI-устройства напрямую и
+поставить одинаковый Default Format в свойствах записи/воспроизведения Windows.
+В интерфейсе AIEQ доступны форматы NumPy-потока `float32`, `int32` и `int16`;
+packed `int24` скрипт показывает только для диагностики PortAudio.
+
 ## AutoEQ
 
-По умолчанию `AIEQ_AUTOEQ_BACKEND=auto`: приложение использует официальный пакет `autoeq`, если он доступен, и переключается на локальный fallback только если официальный backend недоступен.
+По умолчанию `AIEQ_AUTOEQ_BACKEND=auto`: приложение использует официальный пакет `autoeq`, если он доступен, и переключается на локальный `dmitryz1024`, если официальный backend недоступен.
+Локальный `dmitryz1024` использует детальный подбор фильтров по снижению ошибки между устройством и target-кривой.
 
 Для строгой проверки официального backend:
 
 ```ini
 AIEQ_AUTOEQ_BACKEND=official
+```
+
+Для принудительного локального backend:
+
+```ini
+AIEQ_AUTOEQ_BACKEND=local
 ```
 
 ## Сборка и запуск EXE
