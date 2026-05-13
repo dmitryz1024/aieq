@@ -23,3 +23,5 @@ build/
 models/*.gguf
 models/*.bin
 models/*.safetensors
+runtime/llama.cpp/*.dll
+runtime/llama.cpp/*.exe

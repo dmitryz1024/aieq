@@ -261,6 +261,7 @@ class AiWorker(QObject):
         saved_presets: list[Preset],
         model_path: Path | None,
         device_curve: FrequencyCurve | None,
+        chat_history: list[dict[str, str]],
     ) -> None:
         super().__init__()
         self.service = service
@@ -269,6 +270,7 @@ class AiWorker(QObject):
         self.saved_presets = saved_presets
         self.model_path = model_path
         self.device_curve = device_curve
+        self.chat_history = chat_history
 
     def run(self) -> None:
         self.finished.emit(
@@ -278,6 +280,7 @@ class AiWorker(QObject):
                 saved_presets=self.saved_presets,
                 model_path=self.model_path,
                 device_curve=self.device_curve,
+                chat_history=self.chat_history,
             )
         )
 
@@ -435,6 +438,7 @@ class MainWindow(QMainWindow):
         self._updating = False
         self._ai_thread: QThread | None = None
         self._ai_worker: AiWorker | None = None
+        self.chat_messages: list[dict[str, str]] = []
         self.filter_rows: list[FilterEditorRow] = []
         self.selected_filter_row = -1
         self.settings = QSettings()
@@ -1558,6 +1562,7 @@ class MainWindow(QMainWindow):
             self.show_toast("ИИ-агент еще отвечает")
             return
         self.ai_service.clear_context()
+        self.chat_messages.clear()
         self.chat_history.clear()
         self.append_chat("AIEQ", CHAT_INTRO_TEXT)
 
@@ -1638,6 +1643,7 @@ class MainWindow(QMainWindow):
         self.send_button.setEnabled(False)
         self.send_button.setText("Думаю...")
         self.append_chat("Вы", text)
+        self.chat_messages.append({"role": "user", "content": text})
         self.show_toast("ИИ-агент думает")
 
         self._ai_thread = QThread(self)
@@ -1648,6 +1654,7 @@ class MainWindow(QMainWindow):
             saved_presets=[preset.clone(keep_id=True) for preset in self.saved_presets],
             model_path=self.selected_ai_model_path(),
             device_curve=self.selected_device_curve,
+            chat_history=list(self.chat_messages),
         )
         self._ai_worker.moveToThread(self._ai_thread)
         self._ai_thread.started.connect(self._ai_worker.run)
@@ -1669,6 +1676,7 @@ class MainWindow(QMainWindow):
         self.populate_filter_editor()
         self.refresh_presets()
         self.append_chat("AIEQ", result.assistant_message)
+        self.chat_messages.append({"role": "assistant", "content": result.assistant_message})
         self.show_toast("Пресет применен")
         self.send_button.setEnabled(True)
         self.send_button.setText("Отправить")

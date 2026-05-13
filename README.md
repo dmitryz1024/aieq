@@ -22,9 +22,50 @@ Copy-Item .env.example .env
 
 ## CUDA / GPU
 
-Код приложения теперь передает в `llama-cpp-python` параметры GPU offload (`n_gpu_layers`, `n_batch`). На Windows для реального CUDA-ускорения надежный вариант - собрать `llama-cpp-python` из исходников с `GGML_CUDA=on`.
+Recommended GPU path is an external `llama.cpp` runtime with the CUDA build of
+`llama-server.exe`. Put the executable and all DLLs from the main archive here:
 
-Минимальная подготовка:
+```text
+runtime/llama.cpp/llama-server.exe
+```
+
+For NVIDIA acceleration, also unpack the separate llama.cpp CUDA DLL archive into
+the same folder. The folder must contain `ggml-cuda.dll` and CUDA runtime DLLs
+such as `cudart64_*.dll`, `cublas64_*.dll`, and `cublasLt64_*.dll`.
+
+Check that the runtime sees the discrete GPU:
+
+```powershell
+.\runtime\llama.cpp\llama-server.exe --list-devices
+```
+
+The output must include `CUDA0` / NVIDIA. If it lists only CPU backends, the CUDA
+DLL pack is missing or cannot be loaded.
+
+Then keep `.env` in `auto` mode. AIEQ will try `llama-server` first. With the
+settings below it will not silently fall back to CPU inference.
+
+```ini
+AIEQ_AI_PROVIDER=auto
+AIEQ_AI_ALLOW_CPU_FALLBACK=0
+AIEQ_LLAMA_SERVER_PATH=runtime/llama.cpp/llama-server.exe
+AIEQ_LLAMA_SERVER_HOST=127.0.0.1
+AIEQ_LLAMA_SERVER_PORT=8080
+AIEQ_LLAMA_SERVER_AUTO_START=1
+AIEQ_LLAMA_SERVER_DEVICE=CUDA0
+AIEQ_LLAMA_SERVER_REQUIRE_GPU=1
+AIEQ_LLAMA_SERVER_PARALLEL=1
+AIEQ_LLAMA_SERVER_FLASH_ATTN=on
+AIEQ_LLAMA_SERVER_REASONING=off
+AIEQ_LLAMA_SERVER_CACHE_RAM=0
+AIEQ_LLAMA_SERVER_LOG_PATH=
+```
+
+When AIEQ starts `llama-server` itself, logs are written to
+`%APPDATA%\AIEQ\logs\llama-server.log`. Set `AIEQ_LLAMA_SERVER_LOG_PATH` to use a
+different file. If you start the server manually, its logs stay in that terminal.
+
+The older in-process `llama-cpp-python` path is still supported as a CPU fallback. If you specifically want CUDA through the Python package, build it from source:
 
 1. Установите NVIDIA Driver, CUDA Toolkit и Visual Studio Build Tools с C++ workload.
 2. Откройте Developer PowerShell for VS.
@@ -47,27 +88,33 @@ AIEQ_LLAMA_N_BATCH=512
 
 ## Модель
 
-Рекомендуемая компактная модель: `Qwen/Qwen2.5-3B-Instruct-GGUF`, файл `qwen2.5-3b-instruct-q4_k_m.gguf`.
+Рекомендуемая компактная модель: `Qwen/Qwen3-4B-GGUF`, файл `Qwen3-4B-Q4_K_M.gguf`.
 
 1. Создайте папку `models`, если ее нет.
-2. Скачайте `qwen2.5-3b-instruct-q4_k_m.gguf` со страницы Hugging Face `Qwen/Qwen2.5-3B-Instruct-GGUF`.
+2. Скачайте `Qwen3-4B-Q4_K_M.gguf` со страницы Hugging Face `Qwen/Qwen3-4B-GGUF`.
 3. Положите файл сюда:
 
 ```text
-models/qwen2.5-3b-instruct-q4_k_m.gguf
+models/Qwen3-4B-Q4_K_M.gguf
 ```
 
 4. Проверьте `.env`:
 
 ```ini
-AIEQ_AI_PROVIDER=llama_cpp
-AIEQ_LLAMA_MODEL_PATH=models/qwen2.5-3b-instruct-q4_k_m.gguf
+AIEQ_AI_PROVIDER=auto
+AIEQ_LLAMA_MODEL_PATH=models/Qwen3-4B-Q4_K_M.gguf
 AIEQ_LLAMA_N_CTX=8192
 AIEQ_LLAMA_N_THREADS=7
 AIEQ_LLAMA_N_GPU_LAYERS=-1
 AIEQ_LLAMA_N_BATCH=512
+AIEQ_LLAMA_SERVER_PATH=runtime/llama.cpp/llama-server.exe
+AIEQ_LLAMA_SERVER_DEVICE=CUDA0
+AIEQ_LLAMA_SERVER_REQUIRE_GPU=1
+AIEQ_LLAMA_SERVER_PARALLEL=1
 AIEQ_AUTOEQ_BACKEND=auto
 ```
+
+Точные EQ-команды вроде `добавь широкий подъем на 3 дб с центром 2000 гц` обрабатываются локальным rule-based парсером до обращения к модели. Это делает точные частоты/дБ надежными даже без GPU.
 
 Если модель не подключена, чат покажет: `Ваш ИИ-агент не подключен`.
 
