@@ -78,7 +78,7 @@ def test_audio_engine_requests_target_latency_stream(monkeypatch) -> None:
     engine.start(input_device, output_device, Preset("Flat", []), sample_rate=48000)
 
     assert captured["blocksize"] == 0
-    assert captured["latency"] == (0.05, 0.05)
+    assert captured["latency"] == ("low", "low")
     assert captured["clip_off"] is True
     assert captured["dither_off"] is True
     assert engine.output_latency_ms == 20.0
@@ -106,13 +106,13 @@ def test_audio_engine_falls_back_to_low_latency_if_target_latency_fails(monkeypa
     monkeypatch.setattr("source.audio._sounddevice", lambda: FakeSd())
     input_device = AudioDevice(1, "Input", "WASAPI", 2, 0, 48000)
     output_device = AudioDevice(2, "Output", "WASAPI", 0, 2, 48000)
-    engine = AudioEngine(fir_taps=129)
+    engine = AudioEngine(latency=0.05, fir_taps=129)
     engine.start(input_device, output_device, Preset("Flat", []), sample_rate=48000)
 
     assert attempts == [(0.05, 0.05), ("low", "low")]
 
 
-def test_audio_engine_uses_conservative_latency_for_mme(monkeypatch) -> None:
+def test_audio_engine_uses_low_latency_without_extra_flags_for_mme(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
     class FakeStream:
@@ -134,10 +134,35 @@ def test_audio_engine_uses_conservative_latency_for_mme(monkeypatch) -> None:
     engine = AudioEngine(fir_taps=129)
     engine.start(input_device, output_device, Preset("Flat", []), sample_rate=48000)
 
-    assert captured["latency"] == ("high", "high")
+    assert captured["latency"] == ("low", "low")
     assert "clip_off" not in captured
     assert "dither_off" not in captured
     assert "prime_output_buffers_using_stream_callback" not in captured
+
+
+def test_audio_engine_allows_explicit_custom_latency_for_mme(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeStream:
+        latency = (0.03, 0.03)
+
+        def __init__(self, **kwargs) -> None:
+            captured.update(kwargs)
+
+        def start(self) -> None:
+            pass
+
+    class FakeSd:
+        Stream = FakeStream
+
+    monkeypatch.setattr("source.audio._sounddevice", lambda: FakeSd())
+    input_device = AudioDevice(1, "Input", "MME", 2, 0, 48000)
+    output_device = AudioDevice(2, "Output", "MME", 0, 2, 48000)
+    engine = AudioEngine(fir_taps=129)
+    engine.set_latency(("low", 0.03), custom=True)
+    engine.start(input_device, output_device, Preset("Flat", []), sample_rate=48000)
+
+    assert captured["latency"] == ("low", 0.03)
 
 
 def test_audio_limiter_prevents_overflow_without_latency() -> None:

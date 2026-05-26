@@ -9,6 +9,7 @@ from source.ai import (
     DEFAULT_LLAMA_N_CTX,
     MAX_DEVICE_POINTS,
     AiEqualizerService,
+    read_gguf_context_length,
 )
 from source.curves import FrequencyCurve
 from source.models import EqFilter, Preset, flat_preset
@@ -37,6 +38,37 @@ def test_default_llama_context_is_larger(monkeypatch) -> None:
     monkeypatch.delenv("AIEQ_LLAMA_N_CTX", raising=False)
     service = AiEqualizerService()
     assert service.llama_n_ctx == DEFAULT_LLAMA_N_CTX
+
+
+def test_runtime_overrides_replace_env_ai_generation_settings(monkeypatch) -> None:
+    monkeypatch.setenv("AIEQ_LLAMA_N_CTX", "8192")
+    monkeypatch.setenv("AIEQ_LLAMA_MAX_TOKENS", "900")
+    monkeypatch.setenv("AIEQ_LLAMA_TEMPERATURE", "0.2")
+    monkeypatch.setenv("AIEQ_AI_ALLOW_CPU_FALLBACK", "1")
+    service = AiEqualizerService()
+    service.set_runtime_overrides(n_ctx=4096, max_tokens=1200, temperature=0.45, allow_cpu_fallback=False)
+    service._refresh_config()
+
+    assert service.llama_n_ctx == 4096
+    assert service.llama_max_tokens == 1200
+    assert service.llama_temperature == 0.45
+    assert service.ai_allow_cpu_fallback is False
+
+
+def test_gguf_context_length_is_read_from_metadata(tmp_path) -> None:
+    import struct
+
+    model = tmp_path / "tiny.gguf"
+    key = b"qwen3.context_length"
+    with model.open("wb") as file:
+        file.write(b"GGUF")
+        file.write(struct.pack("<IQQ", 3, 0, 1))
+        file.write(struct.pack("<Q", len(key)))
+        file.write(key)
+        file.write(struct.pack("<I", 4))
+        file.write(struct.pack("<I", 40960))
+
+    assert read_gguf_context_length(model) == 40960
 
 
 def test_new_preset_is_named_new() -> None:

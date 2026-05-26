@@ -113,7 +113,7 @@ AIEQ_LLAMA_N_BATCH=1024
 AIEQ_LLAMA_MAX_TOKENS=2048
 AIEQ_LLAMA_TEMPERATURE=0.35
 AIEQ_AUDIO_BLOCK_SIZE=0
-AIEQ_AUDIO_LATENCY=50ms
+AIEQ_AUDIO_LATENCY=low
 AIEQ_LLAMA_SERVER_PATH=runtime/llama.cpp/llama-server.exe
 AIEQ_LLAMA_SERVER_DEVICE=CUDA0
 AIEQ_LLAMA_SERVER_REQUIRE_GPU=1
@@ -142,10 +142,9 @@ uv run python -m source
 4. Нажмите `Старт`.
 
 Для меньшей задержки приложение по умолчанию запускает поток с
-`AIEQ_AUDIO_LATENCY=50ms` и `AIEQ_AUDIO_BLOCK_SIZE=0`, чтобы попросить у
-PortAudio более короткий буфер. Если драйвер откажется открыть такой поток,
-приложение автоматически откатится на `low`. Если появится треск, поставьте
-`AIEQ_AUDIO_LATENCY=low` или `AIEQ_AUDIO_BLOCK_SIZE=256`.
+`AIEQ_AUDIO_LATENCY=low` и `AIEQ_AUDIO_BLOCK_SIZE=0`. Пользовательскую задержку
+можно включить в окне настроек приложения. Для MME приложение оставляет более
+консервативный безопасный запуск, если пользовательская задержка не включена.
 
 Если в AIEQ доступна только одна частота дискретизации, проверьте пару устройств
 вне приложения:

@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from threading import Lock
-from typing import Any
+from typing import Any, TypeAlias
 
 import numpy as np
 
@@ -17,8 +17,9 @@ AUDIO_DTYPE_LABELS: dict[str, str] = {
     "int16": "16-bit PCM",
 }
 DEFAULT_AUDIO_BLOCK_SIZE = 0
-DEFAULT_AUDIO_LATENCY: str | float = 0.05
+DEFAULT_AUDIO_LATENCY: str | float = "low"
 OUTPUT_LIMITER_CEILING = 0.98
+AudioLatency: TypeAlias = str | float | tuple[str | float, str | float]
 
 
 def _env_int(name: str, default: int) -> int:
@@ -146,7 +147,7 @@ class AudioEngine:
         block_size: int | None = None,
         fir_taps: int = 1025,
         crossfade_frames: int = 4096,
-        latency: str | float | None = None,
+        latency: AudioLatency | None = None,
     ) -> None:
         self.sample_rate = float(sample_rate)
         self.dtype = "float32"
@@ -154,6 +155,7 @@ class AudioEngine:
         self.fir_taps = int(fir_taps)
         self.crossfade_frames = int(crossfade_frames)
         self.latency = latency if latency is not None else _env_latency("AIEQ_AUDIO_LATENCY", DEFAULT_AUDIO_LATENCY)
+        self.custom_latency_enabled = latency is not None
         self.stream: Any | None = None
         self.channels = 2
         self.processor = StreamingFir(design_fir_from_preset(flat_preset(), self.sample_rate, self.fir_taps), channels=2)
@@ -162,6 +164,10 @@ class AudioEngine:
         self.lock = Lock()
         self.last_error: str | None = None
         self.last_status: str | None = None
+
+    def set_latency(self, latency: AudioLatency, *, custom: bool = False) -> None:
+        self.latency = latency
+        self.custom_latency_enabled = custom
 
     @property
     def is_running(self) -> bool:
@@ -222,13 +228,14 @@ class AudioEngine:
         self.last_status = None
         uses_mme = self._uses_mme(input_device, output_device)
         latency = self._effective_latency(input_device, output_device)
+        stream_latency = latency if isinstance(latency, tuple) else (latency, latency)
         stream_kwargs = {
             "device": (input_device.index, output_device.index),
             "samplerate": self.sample_rate,
             "blocksize": self.block_size,
             "dtype": self.dtype,
             "channels": self.channels,
-            "latency": (latency, latency),
+            "latency": stream_latency,
             "callback": self._callback,
         }
         if not uses_mme:
@@ -269,9 +276,7 @@ class AudioEngine:
             raise last_error
         return sd.Stream(**stream_kwargs)
 
-    def _effective_latency(self, input_device: AudioDevice, output_device: AudioDevice) -> str | float:
-        if self._uses_mme(input_device, output_device):
-            return "high"
+    def _effective_latency(self, input_device: AudioDevice, output_device: AudioDevice) -> AudioLatency:
         return self.latency
 
     @staticmethod

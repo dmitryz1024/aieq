@@ -4,6 +4,7 @@ import json
 import os
 import shlex
 import shutil
+import struct
 import subprocess
 import time
 import urllib.error
@@ -86,6 +87,100 @@ COMPACT_DEVICE_RAW_LINES = 24
 COMPACT_DEVICE_RAW_CHARS = 1200
 COMPACT_DEVICE_POINTS = 24
 COMPACT_CHAT_MESSAGES = 10
+GGUF_VALUE_SIZES = {
+    0: 1,
+    1: 1,
+    2: 2,
+    3: 2,
+    4: 4,
+    5: 4,
+    6: 4,
+    7: 1,
+    10: 8,
+    11: 8,
+    12: 8,
+}
+
+
+def read_gguf_context_length(model_path: Path) -> int | None:
+    try:
+        with model_path.open("rb") as file:
+            if file.read(4) != b"GGUF":
+                return None
+            _read_struct(file, "<I")
+            _read_struct(file, "<Q")
+            metadata_count = int(_read_struct(file, "<Q"))
+            for _ in range(metadata_count):
+                key = _read_gguf_string(file)
+                value_type = int(_read_struct(file, "<I"))
+                if key.endswith(".context_length") and value_type in {4, 5, 10, 11}:
+                    return max(1, int(_read_gguf_scalar(file, value_type)))
+                _skip_gguf_value(file, value_type)
+    except (OSError, struct.error, UnicodeDecodeError, ValueError):
+        return None
+    return None
+
+
+def _read_struct(file: Any, fmt: str) -> int | float:
+    size = struct.calcsize(fmt)
+    data = file.read(size)
+    if len(data) != size:
+        raise ValueError("Unexpected GGUF EOF")
+    value = struct.unpack(fmt, data)
+    return value[0]
+
+
+def _read_gguf_string(file: Any) -> str:
+    length = int(_read_struct(file, "<Q"))
+    data = file.read(length)
+    if len(data) != length:
+        raise ValueError("Unexpected GGUF string EOF")
+    return data.decode("utf-8")
+
+
+def _read_gguf_scalar(file: Any, value_type: int) -> int | float | bool:
+    formats = {
+        0: "<B",
+        1: "<b",
+        2: "<H",
+        3: "<h",
+        4: "<I",
+        5: "<i",
+        6: "<f",
+        7: "<?",
+        10: "<Q",
+        11: "<q",
+        12: "<d",
+    }
+    fmt = formats.get(value_type)
+    if fmt is None:
+        raise ValueError(f"Unsupported GGUF scalar type: {value_type}")
+    return _read_struct(file, fmt)
+
+
+def _skip_gguf_value(file: Any, value_type: int) -> None:
+    if value_type == 8:
+        length = int(_read_struct(file, "<Q"))
+        file.seek(length, os.SEEK_CUR)
+        return
+    if value_type == 9:
+        item_type = int(_read_struct(file, "<I"))
+        count = int(_read_struct(file, "<Q"))
+        if item_type == 8:
+            for _ in range(count):
+                _skip_gguf_value(file, item_type)
+            return
+        item_size = GGUF_VALUE_SIZES.get(item_type)
+        if item_size is None:
+            for _ in range(count):
+                _skip_gguf_value(file, item_type)
+            return
+        file.seek(item_size * count, os.SEEK_CUR)
+        return
+    item_size = GGUF_VALUE_SIZES.get(value_type)
+    if item_size is None:
+        raise ValueError(f"Unsupported GGUF value type: {value_type}")
+    file.seek(item_size, os.SEEK_CUR)
 
 
 def list_local_models(models_dir: Path = MODELS_DIR) -> list[Path]:
@@ -138,7 +233,31 @@ class AiEqualizerService:
         self._llama_server_log_file: Any | None = None
         self._llama: Any | None = None
         self._llama_signature: tuple[str, int, int, int, int] | None = None
+        self._runtime_overrides: dict[str, int | float | bool | None] = {
+            "n_ctx": None,
+            "max_tokens": None,
+            "temperature": None,
+            "allow_cpu_fallback": None,
+        }
         self._refresh_config()
+
+    def set_runtime_overrides(
+        self,
+        *,
+        n_ctx: int | None = None,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+        allow_cpu_fallback: bool | None = None,
+    ) -> None:
+        self._runtime_overrides = {
+            "n_ctx": n_ctx,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "allow_cpu_fallback": allow_cpu_fallback,
+        }
+
+    def clear_runtime_overrides(self) -> None:
+        self.set_runtime_overrides()
 
     def _refresh_config(self) -> None:
         load_env_file()
@@ -172,6 +291,21 @@ class AiEqualizerService:
         self.llama_server_extra_args = os.environ.get("AIEQ_LLAMA_SERVER_EXTRA_ARGS", "").strip()
         log_path = os.environ.get("AIEQ_LLAMA_SERVER_LOG_PATH", "").strip()
         self.llama_server_log_path = Path(log_path).expanduser() if log_path else self._default_llama_server_log_path()
+        self._apply_runtime_overrides()
+
+    def _apply_runtime_overrides(self) -> None:
+        n_ctx = self._runtime_overrides.get("n_ctx")
+        max_tokens = self._runtime_overrides.get("max_tokens")
+        temperature = self._runtime_overrides.get("temperature")
+        allow_cpu_fallback = self._runtime_overrides.get("allow_cpu_fallback")
+        if isinstance(n_ctx, int) and n_ctx > 0:
+            self.llama_n_ctx = n_ctx
+        if isinstance(max_tokens, int) and max_tokens > 0:
+            self.llama_max_tokens = max_tokens
+        if isinstance(temperature, (int, float)):
+            self.llama_temperature = float(temperature)
+        if isinstance(allow_cpu_fallback, bool):
+            self.ai_allow_cpu_fallback = allow_cpu_fallback
 
     def suggest_preset(
         self,
