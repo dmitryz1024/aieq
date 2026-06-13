@@ -2,16 +2,29 @@ from __future__ import annotations
 
 import numpy as np
 
+from source.audio import AudioDevice, AudioEngine, list_supported_stream_settings
+from source.autoeq_service import build_autoeq_preset, build_autoeq_preset_result
+from source.curves import FrequencyCurve
 from source.dsp import GRAPH_FREQS, design_fir_from_preset, envelope_response_db, filter_response_db, preset_response_db
 from source.models import EqFilter, Preset
-from source.audio import AudioDevice, AudioEngine, list_supported_stream_settings
-from source.curves import FrequencyCurve
-from source.autoeq_service import build_autoeq_preset, build_autoeq_preset_result
 
 
 def test_zero_gain_peaking_is_flat() -> None:
     response = filter_response_db(EqFilter("peaking", 1000.0, 1.0, 0.0), GRAPH_FREQS)
     assert np.max(np.abs(response)) < 1e-9
+
+
+def test_pass_and_notch_filters_apply_makeup_gain() -> None:
+    checks = [
+        ("low_pass", 100.0, 1000.0),
+        ("high_pass", 6000.0, 1000.0),
+        ("band_pass", 1000.0, 1000.0),
+        ("notch", 250.0, 1000.0),
+    ]
+    for filter_type, probe_freq, center_freq in checks:
+        flat = filter_response_db(EqFilter(filter_type, center_freq, 1.0, 0.0), np.array([probe_freq]))[0]
+        boosted = filter_response_db(EqFilter(filter_type, center_freq, 1.0, 6.0), np.array([probe_freq]))[0]
+        assert 5.8 < boosted - flat < 6.2
 
 
 def test_envelope_mixing_does_not_sum_identical_boosts() -> None:

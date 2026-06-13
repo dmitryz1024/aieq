@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from source.ui import LEGEND_LABEL_MAX_CHARS, elide_middle
+from source.models import EqFilter
+from source.ui import LEGEND_LABEL_MAX_CHARS, MainWindow, elide_middle
 
 
 def test_elide_middle_keeps_short_text() -> None:
@@ -14,3 +15,10 @@ def test_elide_middle_truncates_long_text_from_the_middle() -> None:
     assert shortened.startswith("AutoEQ")
     assert shortened.endswith("Harman 2019")
     assert "..." in shortened
+
+
+def test_preset_signature_matches_editor_visible_precision() -> None:
+    stored = [EqFilter(type="peaking", freq=1000.6, q=1.23456, gain=1.236, enabled=True)]
+    editor_visible = [EqFilter(type="peaking", freq=1001.0, q=1.235, gain=1.24, enabled=True)]
+
+    assert MainWindow.filter_signature(stored) == MainWindow.filter_signature(editor_visible)

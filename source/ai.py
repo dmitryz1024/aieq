@@ -51,13 +51,26 @@ The application combines overlapping filters with envelope mixing, not cascade s
 Therefore avoid stacking many similar filters on the same frequency range; choose decisive bands.
 Use these filter types only: peaking, low_shelf, high_shelf, low_pass, high_pass, band_pass, notch.
 Keep most musical changes within +/-6 dB unless the user asks for a radical effect.
-Use Q around 0.6-1.0 for broad tone, 1.0-2.5 for focused tone, 4.0-10.0 for resonance/notch work.
+Always consider all available filter types before deciding, but prefer the least destructive musical tool.
+For ordinary tone requests, use peaking plus low_shelf/high_shelf as the default vocabulary.
+Peaking filters are for local tonal moves: mids, presence, boxiness, harshness, nasal tone, bass punch.
+Low/high shelves are for broad bass or treble balance: warmth, weight, air, brightness, softness.
+Use low_pass/high_pass only when the user asks for a cutoff, cleanup, rumble/hiss removal, lo-fi/phone/radio effect,
+or when the device curve has a clear extreme-end problem that needs an actual roll-off.
+Use band_pass only for intentional isolation or special effects, not for normal requests like "raise mids",
+"make vocals clearer", "more body", "softer", or "better media sound".
+Use notch only for a narrow unwanted resonance, hum, whistle, ringing, or sharp peak. Do not use it as a general tone tool.
+When a user asks to boost or reduce a range, normally implement it with peaking/shelf filters, not pass filters.
+Pass and band-pass filters are high-impact and should be rare in everyday presets.
+Use Q around 0.5-0.9 for broad tone, 0.9-2.0 for focused tone, 2.0-4.0 for controlled problem areas,
+and 4.0-10.0 only for true resonance/notch work.
 If the user gives explicit frequency, gain, or Q values, follow those values unless they are unsafe or outside limits.
 Frequencies are in Hz. Preserve useful existing filters and produce a complete new preset.
 For exact requests, include filters that match the requested frequencies, gains, and Q values as closely as possible.
 For vague requests, infer a tasteful complete tonal profile: 3-7 enabled filters is usually enough.
-Use broad shelves and broad peaking filters for musical tone shaping; use narrow filters only for resonances,
-harshness, boxiness, sibilance, rumble, or hum. Avoid low_pass/high_pass unless the user asks for a cutoff effect.
+Use creative but plausible EQ decisions: balance the selected device response, the user's taste, and prior dialogue.
+Do not overfit a vague request with extreme cuts, narrow bands, or pass filters.
+If a simple request can be solved by one or two broad peaking/shelf moves, keep it simple.
 If the user asks for a common style, translate it into a concrete EQ curve:
 soft/smooth = less 2.5-6 kHz harshness and controlled air; warm = low-mid body without muddy bass;
 V-shaped/media = bass and air lift with controlled mids; clear/vocal = less mud and more presence without sharpness.
@@ -805,6 +818,46 @@ class AiEqualizerService:
             "compact_context": compact,
         }
 
+    def build_prompt_payload(
+        self,
+        user_text: str,
+        current_preset: Preset,
+        *,
+        saved_presets: list[Preset] | None = None,
+        device_curve: FrequencyCurve | None = None,
+        compact: bool = False,
+        chat_history: list[dict[str, str]] | None = None,
+    ) -> dict[str, Any]:
+        return self._build_llama_payload(
+            user_text,
+            current_preset,
+            saved_presets=saved_presets,
+            device_curve=device_curve,
+            compact=compact,
+            chat_history=chat_history,
+        )
+
+    def build_prompt_context_text(
+        self,
+        user_text: str,
+        current_preset: Preset,
+        *,
+        saved_presets: list[Preset] | None = None,
+        device_curve: FrequencyCurve | None = None,
+        compact: bool = False,
+        chat_history: list[dict[str, str]] | None = None,
+    ) -> str:
+        payload = self.build_prompt_payload(
+            user_text,
+            current_preset,
+            saved_presets=saved_presets,
+            device_curve=device_curve,
+            compact=compact,
+            chat_history=chat_history,
+        )
+        context_payload = {key: value for key, value in payload.items() if key != "user_request"}
+        return json.dumps(context_payload, ensure_ascii=False, indent=2)
+
     @staticmethod
     def _llama_messages(payload: dict[str, Any]) -> list[dict[str, str]]:
         return [
@@ -1069,6 +1122,8 @@ class AiEqualizerService:
                 "raw_txt_is_sampled": False,
                 "points": [],
             }
+        if curve.is_lazy:
+            curve = curve.loaded()
         raw_txt = ""
         raw_txt_is_sampled = False
         if curve.path is not None and curve.path.exists():

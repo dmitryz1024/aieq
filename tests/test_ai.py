@@ -1,13 +1,16 @@
 from __future__ import annotations
 
-import numpy as np
 from pathlib import Path
+from typing import Any, cast
+
+import numpy as np
 
 from source.ai import (
     AI_SCHEMA,
     COMPACT_DEVICE_RAW_LINES,
     DEFAULT_LLAMA_N_CTX,
     MAX_DEVICE_POINTS,
+    SYSTEM_PROMPT,
     AiEqualizerService,
     read_gguf_context_length,
 )
@@ -78,6 +81,14 @@ def test_new_preset_is_named_new() -> None:
 def test_ai_schema_does_not_ask_model_for_preset_name() -> None:
     assert "name" not in AI_SCHEMA["properties"]
     assert "name" not in AI_SCHEMA["required"]
+
+
+def test_system_prompt_discourages_destructive_pass_filters_for_normal_tone() -> None:
+    assert "Always consider all available filter types" in SYSTEM_PROMPT
+    assert "prefer the least destructive musical tool" in SYSTEM_PROMPT
+    assert "For ordinary tone requests, use peaking plus low_shelf/high_shelf as the default vocabulary" in SYSTEM_PROMPT
+    assert "Use band_pass only for intentional isolation or special effects" in SYSTEM_PROMPT
+    assert "Pass and band-pass filters are high-impact and should be rare in everyday presets" in SYSTEM_PROMPT
 
 
 def test_device_curve_context_includes_raw_txt() -> None:
@@ -173,8 +184,8 @@ def test_shutdown_stops_owned_llama_server() -> None:
     process = FakeProcess()
     log = FakeLog()
     service = AiEqualizerService()
-    service._llama_server_process = process
-    service._llama_server_log_file = log
+    service._llama_server_process = cast(Any, process)
+    service._llama_server_log_file = cast(Any, log)
     service.shutdown()
     assert process.terminated is True
     assert process.killed is False

@@ -5,9 +5,9 @@ import time
 from pathlib import Path
 from uuid import uuid4
 
+from source.chat_storage import ChatSession, ChatStore, chat_title_from_first_user_message
 from source.models import EqFilter, Preset
 from source.storage import PresetStore
-from source.chat_storage import ChatSession, ChatStore, chat_title_from_first_user_message
 
 
 def test_preset_store_can_find_by_name_case_insensitive() -> None:

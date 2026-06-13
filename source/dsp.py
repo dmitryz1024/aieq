@@ -42,6 +42,7 @@ def biquad_for_filter(eq_filter: EqFilter, sample_rate: float = DEFAULT_SAMPLE_R
     alpha = sin_w / (2.0 * q)
     gain = item.gain
     amp = 10.0 ** (gain / 40.0)
+    pass_gain = 10.0 ** (gain / 20.0)
 
     if item.type == "peaking":
         b0 = 1.0 + alpha * amp
@@ -75,36 +76,36 @@ def biquad_for_filter(eq_filter: EqFilter, sample_rate: float = DEFAULT_SAMPLE_R
         return _normalize(b0, b1, b2, a0, a1, a2)
 
     if item.type == "low_pass":
-        b0 = (1.0 - cos_w) / 2.0
-        b1 = 1.0 - cos_w
-        b2 = (1.0 - cos_w) / 2.0
+        b0 = pass_gain * (1.0 - cos_w) / 2.0
+        b1 = pass_gain * (1.0 - cos_w)
+        b2 = pass_gain * (1.0 - cos_w) / 2.0
         a0 = 1.0 + alpha
         a1 = -2.0 * cos_w
         a2 = 1.0 - alpha
         return _normalize(b0, b1, b2, a0, a1, a2)
 
     if item.type == "high_pass":
-        b0 = (1.0 + cos_w) / 2.0
-        b1 = -(1.0 + cos_w)
-        b2 = (1.0 + cos_w) / 2.0
+        b0 = pass_gain * (1.0 + cos_w) / 2.0
+        b1 = -pass_gain * (1.0 + cos_w)
+        b2 = pass_gain * (1.0 + cos_w) / 2.0
         a0 = 1.0 + alpha
         a1 = -2.0 * cos_w
         a2 = 1.0 - alpha
         return _normalize(b0, b1, b2, a0, a1, a2)
 
     if item.type == "band_pass":
-        b0 = alpha
+        b0 = pass_gain * alpha
         b1 = 0.0
-        b2 = -alpha
+        b2 = -pass_gain * alpha
         a0 = 1.0 + alpha
         a1 = -2.0 * cos_w
         a2 = 1.0 - alpha
         return _normalize(b0, b1, b2, a0, a1, a2)
 
     if item.type == "notch":
-        b0 = 1.0
-        b1 = -2.0 * cos_w
-        b2 = 1.0
+        b0 = pass_gain
+        b1 = -2.0 * pass_gain * cos_w
+        b2 = pass_gain
         a0 = 1.0 + alpha
         a1 = -2.0 * cos_w
         a2 = 1.0 - alpha
@@ -188,4 +189,3 @@ class StreamingFir:
             if self.taps.size > 1:
                 self.history[channel] = extended[-(self.taps.size - 1) :]
         return output
-

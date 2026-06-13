@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+import warnings
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -99,13 +100,20 @@ def _build_official_autoeq_preset(device_curve: FrequencyCurve, target_curve: Fr
         frequency=np.asarray(target_curve.freqs, dtype=np.float64),
         raw=np.asarray(target_curve.db, dtype=np.float64),
     )
-    measurement.process(
-        target=target,
-        min_mean_error=True,
-        fs=int(DEFAULT_SAMPLE_RATE),
-        concha_interference=False,
-    )
-    peqs = measurement.optimize_parametric_eq(config, int(DEFAULT_SAMPLE_RATE))
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            category=RuntimeWarning,
+            message=r".*divide by zero encountered in scalar divide.*",
+        )
+        warnings.filterwarnings("ignore", category=RuntimeWarning, module=r"autoeq\.peq")
+        measurement.process(
+            target=target,
+            min_mean_error=True,
+            fs=int(DEFAULT_SAMPLE_RATE),
+            concha_interference=False,
+        )
+        peqs = measurement.optimize_parametric_eq(config, int(DEFAULT_SAMPLE_RATE))
 
     filters: list[EqFilter] = []
     for peq in peqs:

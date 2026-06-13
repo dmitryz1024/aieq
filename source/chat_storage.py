@@ -107,6 +107,8 @@ class ChatStore:
                 "INSERT INTO chats(title, messages, context_full, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
                 (session.title, data, int(session.context_full), session.created_at, session.updated_at),
             )
+            if cursor.lastrowid is None:
+                raise RuntimeError("SQLite did not return an id for the saved chat.")
             session.id = int(cursor.lastrowid)
         return session
 

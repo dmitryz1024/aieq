@@ -29,6 +29,8 @@ build = [
 ]
 dev = [
     "pytest>=8.0",
+    "pyrefly>=0.18",
+    "ruff>=0.8",
 ]
 openai = [
     "openai>=1.59.0",
@@ -42,3 +44,53 @@ include = ["source*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 140
+exclude = [
+    ".git",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".tmp",
+    ".venv",
+    "build",
+    "dist",
+    "models",
+    "runtime",
+    "curves/devices/autoeq",
+    "curves/targets/autoeq",
+]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.pyrefly]
+project-includes = [
+    "source/ai.py",
+    "source/audio.py",
+    "source/autoeq_service.py",
+    "source/chat_storage.py",
+    "source/config.py",
+    "source/curves.py",
+    "source/dsp.py",
+    "source/models.py",
+    "source/storage.py",
+    "scripts",
+    "tests",
+]
+project-excludes = [
+    ".git",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".tmp",
+    ".venv",
+    "build",
+    "dist",
+    "models",
+    "runtime",
+    "curves",
+    "source/ui.py",
+    "tests/test_ui.py",
+]
+ignore-missing-imports = ["llama_cpp"]

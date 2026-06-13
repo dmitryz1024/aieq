@@ -81,6 +81,8 @@ class PresetStore:
                 "INSERT INTO presets(name, data, created_at, updated_at) VALUES (?, ?, ?, ?)",
                 (saved.name, data, saved.created_at, saved.updated_at),
             )
+            if cursor.lastrowid is None:
+                raise RuntimeError("SQLite did not return an id for the saved preset.")
             saved.id = int(cursor.lastrowid)
         return saved
 

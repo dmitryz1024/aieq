@@ -7,19 +7,39 @@ from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, co
 
 project_root = Path(SPECPATH)
 assets_dir = project_root / "assets"
-curves_dir = project_root / "curves"
+languages_dir = project_root / "languages"
+
+
+def optional_collect_submodules(package):
+    try:
+        return collect_submodules(package)
+    except Exception:
+        return []
+
+
+def optional_collect_data_files(package):
+    try:
+        return collect_data_files(package)
+    except Exception:
+        return []
+
+
+def optional_collect_dynamic_libs(package):
+    try:
+        return collect_dynamic_libs(package)
+    except Exception:
+        return []
+
 
 datas = []
-for asset in ("icon.png", "icon.ico"):
-    path = assets_dir / asset
-    if path.exists():
-        datas.append((str(path), "assets"))
+if assets_dir.exists():
+    for path in assets_dir.iterdir():
+        if path.is_file() and path.suffix.lower() in {".png", ".ico", ".svg"}:
+            datas.append((str(path), "assets"))
 
-for subdir in ("devices", "targets"):
-    folder = curves_dir / subdir
-    if folder.exists():
-        for path in folder.glob("*.txt"):
-            datas.append((str(path), f"curves/{subdir}"))
+if languages_dir.exists():
+    for path in languages_dir.glob("*.json"):
+        datas.append((str(path), "languages"))
 
 icon_path = assets_dir / "icon.ico"
 
@@ -29,10 +49,10 @@ hiddenimports = [
     "pyqtgraph",
     "sounddevice",
 ]
-hiddenimports += collect_submodules("autoeq")
-hiddenimports += collect_submodules("llama_cpp")
-datas += collect_data_files("llama_cpp")
-binaries += collect_dynamic_libs("llama_cpp")
+hiddenimports += optional_collect_submodules("autoeq")
+hiddenimports += optional_collect_submodules("llama_cpp")
+datas += optional_collect_data_files("llama_cpp")
+binaries += optional_collect_dynamic_libs("llama_cpp")
 
 a = Analysis(
     ["source/__main__.py"],
