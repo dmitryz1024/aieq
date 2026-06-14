@@ -1,199 +1,310 @@
 # AIEQ
 
-AIEQ - Windows-прототип параметрического эквалайзера на Python/PySide6 с real-time обработкой через `sounddevice` и VB-Cable.
+[Russian version (Русская версия)](README-RU.md)
 
-## Возможности
+AIEQ is a parametric equalizer for Windows 10/11 with manual filter editing, preset comparison, an auto-tuning plugin, and an AI chatbot. The application is designed to work through the VB-Cable virtual audio cable: system audio is routed into AIEQ, processed by filters, and returned to the selected output device.
 
-- график АЧХ с текущим пресетом, сохраненными пресетами для сравнения и АЧХ выбранного устройства;
-- фильтры `peaking`, `low_shelf`, `high_shelf`, `low_pass`, `high_pass`, `band_pass`, `notch`;
-- огибающий режим сведения полос: пересекающиеся фильтры не суммируются каскадом;
-- импорт/экспорт JSON-пресетов и SQLite-хранилище пресетов в `%APPDATA%\AIEQ`;
-- AI-чат через локальную GGUF-модель и `llama-cpp-python`;
-- вкладка AutoEQ с официальным backend пакета `autoeq` на Python 3.11 и локальным fallback.
+![Screenshot: main application window](screenshots/1.png)
 
-## Установка среды
+## 1. Features
 
-Официальный AutoEq 4.1.2 требует Python `>=3.8,<3.12`, поэтому проект синхронизируется на Python 3.11:
+- frequency response graph with the current preset, saved presets for comparison, and the selected device response;
+- filters `peaking`, `low shelf`, `high shelf`, `low pass`, `high pass`, `band pass`, `notch`;
+- envelope-style filter mixing: overlapping filters are not summed as a cascade;
+- JSON preset import/export and SQLite preset storage in `%APPDATA%\AIEQ`;
+- AI chat through a local GGUF model and `llama-cpp-python`;
+- support for the official [`autoeq`](https://github.com/jaakkopasanen/AutoEq) package backend on Python 3.11 with almost 7000 device curves to choose from.
+- auto-tuning plugin with 2 solutions: the original algorithm by the developer of the package mentioned above (`jaakkopasanen`) and my modified version (`dmitryz1024`).
 
-```powershell
-uv sync --python 3.11 --extra dev --extra autoeq --extra build --extra ai
-Copy-Item .env.example .env
-```
+[Screencast](https://drive.google.com/file/d/1CIRGF4145KUJEnWvs8e4yJUtxBlE__0m/view?usp=sharing)
 
-## CUDA / GPU
+## 2. Installation And Launch
 
-Recommended GPU path is an external `llama.cpp` runtime with the CUDA build of
-`llama-server.exe`. Put the executable and all DLLs from the main archive here:
+### Via setup.exe
 
-```text
-runtime/llama.cpp/llama-server.exe
-```
+1. Download [`aieq-<version>-setup.exe`](https://github.com/dmitryz1024/aieq/releases/tag/v0.1.0) from GitHub Releases.
+2. Run the installer as a regular user. If Windows asks for administrator rights, confirm.
+3. Choose the installation folder. A folder named `aieq` will be created inside it.
+4. Wait while the installer downloads the default AI model into the `models` folder.
+5. If the installer offers to install VB-Cable, complete the driver installation.
+6. After installing VB-Cable, it is recommended to restart the computer.
 
-For NVIDIA acceleration, also unpack the separate llama.cpp CUDA DLL archive into
-the same folder. The folder must contain `ggml-cuda.dll` and CUDA runtime DLLs
-such as `cudart64_*.dll`, `cublas64_*.dll`, and `cublasLt64_*.dll`.
-
-Check that the runtime sees the discrete GPU:
-
-```powershell
-.\runtime\llama.cpp\llama-server.exe --list-devices
-```
-
-The output must include `CUDA0` / NVIDIA. If it lists only CPU backends, the CUDA
-DLL pack is missing or cannot be loaded.
-
-Then keep `.env` in `auto` mode. AIEQ will try `llama-server` first. With the
-settings below it will not silently fall back to CPU inference.
-
-```ini
-AIEQ_AI_PROVIDER=auto
-AIEQ_AI_ALLOW_CPU_FALLBACK=0
-AIEQ_LLAMA_SERVER_PATH=runtime/llama.cpp/llama-server.exe
-AIEQ_LLAMA_SERVER_HOST=127.0.0.1
-AIEQ_LLAMA_SERVER_PORT=8080
-AIEQ_LLAMA_SERVER_AUTO_START=1
-AIEQ_LLAMA_SERVER_DEVICE=CUDA0
-AIEQ_LLAMA_SERVER_REQUIRE_GPU=1
-AIEQ_LLAMA_SERVER_PARALLEL=1
-AIEQ_LLAMA_SERVER_FLASH_ATTN=on
-AIEQ_LLAMA_SERVER_REASONING=auto
-AIEQ_LLAMA_SERVER_REASONING_FORMAT=deepseek
-AIEQ_LLAMA_SERVER_REASONING_BUDGET=1024
-AIEQ_LLAMA_SERVER_CACHE_RAM=0
-AIEQ_LLAMA_SERVER_LOG_PATH=
-```
-
-When AIEQ starts `llama-server` itself, logs are written to
-`%APPDATA%\AIEQ\logs\llama-server.log`. Set `AIEQ_LLAMA_SERVER_LOG_PATH` to use a
-different file. If you start the server manually, its logs stay in that terminal.
-
-The older in-process `llama-cpp-python` path is still supported as a CPU fallback. If you specifically want CUDA through the Python package, build it from source:
-
-1. Установите NVIDIA Driver, CUDA Toolkit и Visual Studio Build Tools с C++ workload.
-2. Откройте Developer PowerShell for VS.
-3. Переустановите backend:
-
-```powershell
-$env:CMAKE_ARGS="-DGGML_CUDA=on"
-$env:FORCE_CMAKE="1"
-uv pip install --reinstall --no-cache-dir --no-binary llama-cpp-python llama-cpp-python
-```
-
-GPU offload управляется из `.env`:
-
-```ini
-AIEQ_LLAMA_N_GPU_LAYERS=-1
-AIEQ_LLAMA_N_BATCH=1024
-AIEQ_LLAMA_SERVER_REASONING=auto
-```
-
-`-1` означает попытку выгрузить на GPU все слои. Если 4 ГБ VRAM не хватит, поставьте меньшее значение, например `20` или `28`.
-
-## Модель
-
-Рекомендуемая компактная модель: `Qwen/Qwen3-4B-GGUF`, файл `Qwen3-4B-Q4_K_M.gguf`.
-
-1. Создайте папку `models`, если ее нет.
-2. Скачайте `Qwen3-4B-Q4_K_M.gguf` со страницы Hugging Face `Qwen/Qwen3-4B-GGUF`.
-3. Положите файл сюда:
+After installation, these folders should be located next to `AIEQ.exe`:
 
 ```text
-models/Qwen3-4B-Q4_K_M.gguf
+assets\
+curves\
+languages\
+models\
+runtime\
 ```
 
-4. Проверьте `.env`:
+### Via Repository Clone
 
-```ini
-AIEQ_AI_PROVIDER=auto
-AIEQ_LLAMA_MODEL_PATH=models/Qwen3-4B-Q4_K_M.gguf
-AIEQ_LLAMA_N_CTX=12288
-AIEQ_LLAMA_N_THREADS=8
-AIEQ_LLAMA_N_GPU_LAYERS=-1
-AIEQ_LLAMA_N_BATCH=1024
-AIEQ_LLAMA_MAX_TOKENS=2048
-AIEQ_LLAMA_TEMPERATURE=0.35
-AIEQ_AUDIO_BLOCK_SIZE=0
-AIEQ_AUDIO_LATENCY=low
-AIEQ_LLAMA_SERVER_PATH=runtime/llama.cpp/llama-server.exe
-AIEQ_LLAMA_SERVER_DEVICE=CUDA0
-AIEQ_LLAMA_SERVER_REQUIRE_GPU=1
-AIEQ_LLAMA_SERVER_PARALLEL=1
-AIEQ_LLAMA_SERVER_REASONING=auto
-AIEQ_LLAMA_SERVER_REASONING_FORMAT=deepseek
-AIEQ_LLAMA_SERVER_REASONING_BUDGET=1024
-AIEQ_AUTOEQ_BACKEND=auto
-```
-
-AI-вкладка не использует ручные шаблоны пресетов: все содержательные изменения АЧХ формируются подключенной моделью.
-
-Если модель не подключена, чат покажет: `Ваш ИИ-агент не подключен`.
-
-## Запуск из исходников
+Clone the repository:
 
 ```powershell
+git clone https://github.com/dmitryz1024/aieq
+```
+
+Run:
+
+```powershell
+uv sync --python 3.11 --extra dev --extra autoeq --extra ai
 uv run python -m source
 ```
 
-Типичный сценарий с VB-Cable:
+Look for the AI model in `.gguf` format here: [click](https://huggingface.co/), and place it in the `models` folder.
 
-1. В Windows выберите `CABLE Input` как системный вывод.
-2. В AIEQ выберите вход `CABLE Output`.
-3. В AIEQ выберите реальные наушники/колонки как выход.
-4. Нажмите `Старт`.
+Look for the `.dll` and `.exe` files required for GPU model execution here: [click](https://github.com/ggml-org/llama.cpp/releases), and place them in the `runtime` folder.
 
-Для меньшей задержки приложение по умолчанию запускает поток с
-`AIEQ_AUDIO_LATENCY=low` и `AIEQ_AUDIO_BLOCK_SIZE=0`. Пользовательскую задержку
-можно включить в окне настроек приложения. Для MME приложение оставляет более
-консервативный безопасный запуск, если пользовательская задержка не включена.
-
-Если в AIEQ доступна только одна частота дискретизации, проверьте пару устройств
-вне приложения:
-
+Tests (pytest, ruff, pyrefly) are run using the following command:
 ```powershell
-uv run python scripts/check_audio_formats.py --input "CABLE Output" --output "название выхода"
+uv run python -m tests.check_all
 ```
 
-Скрипт покажет, какие частоты отдельно принимает вход, отдельно выход и какие
-варианты проходят именно как full-duplex пара. Если 192000 есть в Windows, но не
-проходит как full-duplex пара, обычно нужно выбрать WASAPI-устройства напрямую и
-поставить одинаковый Default Format в свойствах записи/воспроизведения Windows.
-В интерфейсе AIEQ доступны форматы NumPy-потока `float32`, `int32` и `int16`;
-packed `int24` скрипт показывает только для диагностики PortAudio.
+## 3. Audio Route Setup
 
-## AutoEQ
+Typical route:
 
-По умолчанию `AIEQ_AUTOEQ_BACKEND=auto`: приложение использует официальный пакет `autoeq`, если он доступен, и переключается на локальный `dmitryz1024`, если официальный backend недоступен.
-Локальный `dmitryz1024` использует детальный подбор фильтров по снижению ошибки между устройством и target-кривой.
+1. In Windows, select `CABLE Input` as the default output device.
+2. In AIEQ, select the device corresponding to VB-Cable output in the `Input` field.
+3. In the `Output` field, select your real headphones, speakers, or external DAC.
+4. Select the sample rate (`SR (Hz)`) and output stream format. If unsure, keep the default option.
+5. Press the start button.
 
-Для строгой проверки официального backend:
+![Screenshot: input and output selection](screenshots/2.png)
 
-```ini
-AIEQ_AUTOEQ_BACKEND=official
-```
+If there is no sound:
 
-Для принудительного локального backend:
+- first make sure you use the same audio subsystem for both input and output (shown in square brackets before the device name)
+- press the audio device list refresh button;
+- check that VB-Cable is installed and available in Windows settings;
+- make sure Windows is actually sending audio to `CABLE Input`;
+- try different subsystems to start the stream if several are available.
 
-```ini
-AIEQ_AUTOEQ_BACKEND=local
-```
+## 4. Working With The Graph
 
-## Сборка и запуск EXE
+The frequency response section displays:
 
-```powershell
-.\scripts\build_exe.ps1
-```
+- the selected device curve;
+- the current editable preset;
+- the auto-tuning target curve, if enabled;
+- saved presets for comparison.
 
-Результат:
+The `Compare` button opens the list of saved presets. You can select several presets or choose `As many as possible` if you need to quickly show available presets within the display limit (15 items).
+
+![Screenshot: graph and preset comparison](screenshots/3.png)
+
+## 5. Devices And Target Curves
+
+Device curves are stored in:
 
 ```text
-dist\AIEQ\AIEQ.exe
+curves\devices\
 ```
 
-Для запуска откройте `dist\AIEQ\AIEQ.exe`. GGUF-модель не вшивается в exe; положите папку `models` рядом с exe или оставьте путь к модели в `.env` относительно рабочей папки запуска.
+Target curves are stored in:
 
-## Проверки
+```text
+curves\targets\
+```
+
+To add new curves:
+
+1. Copy `.txt` or `.csv` files into the required folder.
+2. Press the curve list refresh button in the application.
+3. Select the new curve from the list.
+
+Curve format: frequency and value in dB in two columns, for example:
+
+```text
+20 -3.1
+100 -1.4
+1000 0.0
+10000 2.2
+```
+
+## 6. Manual Filter Editing
+
+One filter contains:
+
+- `Type` - filter type;
+- `Gain` - level change in dB;
+- `Frequency` - center frequency or cutoff frequency;
+- `Q factor` - quality factor that affects the width of the effect.
+
+Available types:
+
+- peaking;
+- low shelf;
+- high shelf;
+- low pass;
+- high pass;
+- band pass;
+- notch.
+
+A more detailed description of each type is available inside the application by pressing the mini-icon in the filter card, to the left of the type name.
+
+![Screenshot: filter cards](screenshots/4.png)
+
+For most musical tasks, it is better to start with `peaking`, `low shelf`, and `high shelf`. `low pass`, `high pass`, `band pass`, and `notch` filters should be used carefully: they change the structure of the signal more strongly and are more often needed for special tasks.
+
+## 7. Presets
+
+The current preset is selected in the `Current preset` list. The `New` item creates a new editable preset.
+
+Available actions:
+
+- save preset;
+- delete preset;
+- import in JSON format;
+- export in JSON format;
+- compare the current preset with saved ones.
+
+## 8. Auto-Tuning
+
+The auto-tuning tab builds a preset from the selected device curve and target curve (it adjusts the current device curve toward the target).
+
+1. Select a device.
+2. Open the auto-tuning tab.
+3. Select a target curve.
+4. Select an algorithm.
+5. Press `Calculate auto-tuning`.
+
+After calculation, the new preset is saved, becomes current, and is displayed on the graph.
+
+![Screenshot: auto-tuning tab](screenshots/5.png)
+
+## 9. AI Chatbot
+
+The AI chatbot accepts a normal text request and returns a new preset. The model receives the context of the current device, current preset, chat history, and, if the request contains the name of any already saved preset, that preset's data.
+
+Example requests:
+
+```text
+Make the sound softer and calmer, without harsh upper mids.
+```
+
+```text
+Add a little bass density, but do not touch the sub-bass.
+```
+
+```text
+Refine preset AIEQ 2026-05-06 | 01-59-52: slightly lift the vocal.
+```
+
+![Screenshot: AI chat](screenshots/6.png)
+
+If the model is not connected, the application will show a system notification that the AI agent is not connected.
+
+## 10. AI Models
+
+Models are stored in:
+
+```text
+models\
+```
+
+To add a model:
+
+1. Copy the `.gguf` file into `models`.
+2. Press the model list refresh button.
+3. Select the model from the dropdown list.
+
+For GPU execution of the AI model, `llama-server.exe` and DLLs must be located in:
+
+```text
+runtime\
+```
+
+GPU availability check:
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest -p no:cacheprovider
-.\.venv\Scripts\python.exe -m compileall source
+.\runtime\llama-server.exe --list-devices
 ```
+
+The output should contain `CUDA0`.
+
+## 11. Interface Languages
+
+Language files are stored in:
+
+```text
+languages\
+```
+
+To add a language:
+
+1. Create a new `.json` using `ru.json` or `en.json` as a template.
+2. Put the file into the `languages` folder.
+3. Open the application settings.
+4. Press the language list refresh button.
+5. Select the new language.
+
+## 12. Replacing Interface Images
+
+Images are stored in:
+
+```text
+assets\
+```
+
+They can be replaced manually. Changes will be picked up after restarting the application.
+
+## 13. Settings
+
+The settings button opens application settings. There you can:
+
+- view the current audio stream latency;
+- enable custom latency;
+- enable advanced AI settings;
+- allow or disallow CPU use for AI response generation;
+- change the interface language.
+
+![Screenshot: settings window](screenshots/7.png)
+
+## 14. Useful scripts
+
+In the `scripts` folder, you will find a number of useful utilities that allow you to:
+- reset window layout dimensions to default values
+```powershell
+uv run python -m scripts.reset_window_layout
+```
+- synchronize device and target curve lists with the latest updates from the [`autoeq`](https://github.com/jaakkopasanen/AutoEq) package
+```powershell
+uv run python -m scripts.sync_autoeq_curves
+```
+- check supported stream parameters for a specific input/output device pair
+```powershell
+uv run python -m scripts.check_audio_formats
+```
+
+## 15. Common Problems
+
+### No Sound
+
+- Check every stage of the audio stream: Windows -> VB-Cable -> AIEQ -> output device.
+- Press the audio device refresh button.
+- Try another subsystem of the same device.
+- Make sure the application stream is running.
+
+### AI Does Not Respond
+
+- Check that the model is in `models`.
+- Check that `runtime\llama-server.exe` exists.
+- Run `runtime\llama-server.exe --list-devices`.
+- If the GPU is unavailable, allow CPU use in settings (for diagnostics only).
+
+### Auto-Tuning Takes A Long Time
+
+The original auto-tuning algorithm may be slightly slower than the local one. Try both algorithms one by one to find the best option for your tasks.
+
+### New Files Did Not Appear In Lists
+
+Press the corresponding refresh button:
+
+- languages - in settings;
+- models - in the AI tab;
+- curves - in the frequency response section;
+- audio devices - in the top route row.

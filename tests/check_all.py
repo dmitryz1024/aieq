@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from pathlib import Path
 
 
 def main() -> int:
+    pytest_tmp = Path(".tmp") / "pytest"
+    pytest_tmp.mkdir(parents=True, exist_ok=True)
     commands = [
+        [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "--basetemp", str(pytest_tmp)],
         [sys.executable, "-m", "ruff", "check", "."],
         [sys.executable, "-m", "pyrefly", "check"],
     ]

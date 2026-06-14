@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .config import load_env_file
+from .config import load_env_file, resolve_app_path
 from .curves import FrequencyCurve
 from .models import Preset
 
@@ -82,17 +82,21 @@ Never return current_preset or referenced_preset unchanged as your answer.
 Use current_device as the measured response of the selected playback device. If current_device.raw_txt is available,
 treat it as the source-of-truth frequency response data and compensate with respect to that curve.
 First compensate obvious current_device problems, then apply the user's taste request on top of that.
-Respond in Russian in assistant_message. Make assistant_message a brief 1-2 sentence summary of the decisions,
-without listing filter parameters or describing every filter.
+Write assistant_message in the same language as the latest user_request. If the user mixes languages, prefer the
+dominant language of the request. Make assistant_message a brief 1-2 sentence summary of the decisions,
+without listing filter parameters or describing every filter. Keep filter type names and JSON keys exactly as specified.
 """.strip()
 
 NOT_CONNECTED_MESSAGE = "Ваш ИИ-агент не подключен"
 MODELS_DIR = Path("models")
 MODEL_EXTENSIONS = (".gguf",)
-DEFAULT_LLAMA_N_CTX = 12288
+DEFAULT_LLAMA_N_CTX = 8192
 DEFAULT_LLAMA_N_THREADS = min(8, max(1, os.cpu_count() or 8))
-DEFAULT_LLAMA_MAX_TOKENS = 2048
-DEFAULT_LLAMA_TEMPERATURE = 0.35
+DEFAULT_LLAMA_N_BATCH = 512
+DEFAULT_LLAMA_MAX_TOKENS = 900
+DEFAULT_LLAMA_TEMPERATURE = 0.25
+DEFAULT_LLAMA_SERVER_DEVICE = "CUDA0"
+DEFAULT_LLAMA_SERVER_REASONING_BUDGET = 192
 MAX_SAVED_PRESET_FILTERS = 14
 MAX_DEVICE_POINTS = 48
 COMPACT_SAVED_PRESET_FILTERS = 10
@@ -197,6 +201,7 @@ def _skip_gguf_value(file: Any, value_type: int) -> None:
 
 
 def list_local_models(models_dir: Path = MODELS_DIR) -> list[Path]:
+    models_dir = resolve_app_path(models_dir)
     if not models_dir.exists():
         return []
     return sorted(
@@ -218,28 +223,28 @@ class AiEqualizerService:
     def __init__(self, model: str | None = None) -> None:
         self.model_override = model
         self.provider = "auto"
-        self.ai_allow_cpu_fallback = True
+        self.ai_allow_cpu_fallback = False
         self.openai_model = "gpt-5.2"
         self.llama_model_path = Path("models/Qwen3-4B-Q4_K_M.gguf")
         self.llama_n_ctx = DEFAULT_LLAMA_N_CTX
         self.llama_n_threads = DEFAULT_LLAMA_N_THREADS
         self.llama_n_gpu_layers = -1
-        self.llama_n_batch = 1024
+        self.llama_n_batch = DEFAULT_LLAMA_N_BATCH
         self.llama_max_tokens = DEFAULT_LLAMA_MAX_TOKENS
         self.llama_temperature = DEFAULT_LLAMA_TEMPERATURE
-        self.llama_server_path = Path("runtime/llama.cpp/llama-server.exe")
+        self.llama_server_path = Path("runtime/llama-server.exe")
         self.llama_server_host = "127.0.0.1"
         self.llama_server_port = 8080
         self.llama_server_auto_start = True
         self.llama_server_startup_timeout = 45.0
-        self.llama_server_device = "auto"
+        self.llama_server_device = DEFAULT_LLAMA_SERVER_DEVICE
         self.llama_server_parallel = 1
         self.llama_server_flash_attn = "on"
         self.llama_server_reasoning = "auto"
         self.llama_server_reasoning_format = "deepseek"
-        self.llama_server_reasoning_budget = 1024
+        self.llama_server_reasoning_budget = DEFAULT_LLAMA_SERVER_REASONING_BUDGET
         self.llama_server_cache_ram = 0
-        self.llama_server_require_gpu = False
+        self.llama_server_require_gpu = True
         self.llama_server_extra_args = ""
         self.llama_server_log_path = self._default_llama_server_log_path()
         self._llama_server_process: subprocess.Popen[Any] | None = None
@@ -275,32 +280,28 @@ class AiEqualizerService:
     def _refresh_config(self) -> None:
         load_env_file()
         self.provider = os.environ.get("AIEQ_AI_PROVIDER", "auto").strip().lower() or "auto"
-        self.ai_allow_cpu_fallback = self._env_bool("AIEQ_AI_ALLOW_CPU_FALLBACK", True)
+        self.ai_allow_cpu_fallback = self._env_bool("AIEQ_AI_ALLOW_CPU_FALLBACK", False)
         self.openai_model = self.model_override or os.environ.get("AIEQ_OPENAI_MODEL", "gpt-5.2")
-        self.llama_model_path = Path(
-            os.environ.get("AIEQ_LLAMA_MODEL_PATH", "models/Qwen3-4B-Q4_K_M.gguf")
-        ).expanduser()
+        self.llama_model_path = resolve_app_path(Path(os.environ.get("AIEQ_LLAMA_MODEL_PATH", "models/Qwen3-4B-Q4_K_M.gguf")))
         self.llama_n_ctx = self._env_int("AIEQ_LLAMA_N_CTX", DEFAULT_LLAMA_N_CTX)
         self.llama_n_threads = self._env_int("AIEQ_LLAMA_N_THREADS", DEFAULT_LLAMA_N_THREADS)
         self.llama_n_gpu_layers = self._env_int("AIEQ_LLAMA_N_GPU_LAYERS", -1)
-        self.llama_n_batch = self._env_int("AIEQ_LLAMA_N_BATCH", 1024)
+        self.llama_n_batch = self._env_int("AIEQ_LLAMA_N_BATCH", DEFAULT_LLAMA_N_BATCH)
         self.llama_max_tokens = self._env_int("AIEQ_LLAMA_MAX_TOKENS", DEFAULT_LLAMA_MAX_TOKENS)
         self.llama_temperature = self._env_float("AIEQ_LLAMA_TEMPERATURE", DEFAULT_LLAMA_TEMPERATURE)
-        self.llama_server_path = Path(
-            os.environ.get("AIEQ_LLAMA_SERVER_PATH", "runtime/llama.cpp/llama-server.exe")
-        ).expanduser()
+        self.llama_server_path = resolve_app_path(Path(os.environ.get("AIEQ_LLAMA_SERVER_PATH", "runtime/llama-server.exe")))
         self.llama_server_host = os.environ.get("AIEQ_LLAMA_SERVER_HOST", "127.0.0.1").strip() or "127.0.0.1"
         self.llama_server_port = self._env_int("AIEQ_LLAMA_SERVER_PORT", 8080)
         self.llama_server_auto_start = self._env_bool("AIEQ_LLAMA_SERVER_AUTO_START", True)
         self.llama_server_startup_timeout = self._env_float("AIEQ_LLAMA_SERVER_STARTUP_TIMEOUT", 45.0)
-        self.llama_server_device = os.environ.get("AIEQ_LLAMA_SERVER_DEVICE", "auto").strip() or "auto"
+        self.llama_server_device = os.environ.get("AIEQ_LLAMA_SERVER_DEVICE", DEFAULT_LLAMA_SERVER_DEVICE).strip() or DEFAULT_LLAMA_SERVER_DEVICE
         self.llama_server_parallel = max(1, self._env_int("AIEQ_LLAMA_SERVER_PARALLEL", 1))
         self.llama_server_flash_attn = os.environ.get("AIEQ_LLAMA_SERVER_FLASH_ATTN", "on").strip()
         self.llama_server_reasoning = os.environ.get("AIEQ_LLAMA_SERVER_REASONING", "auto").strip()
         self.llama_server_reasoning_format = os.environ.get("AIEQ_LLAMA_SERVER_REASONING_FORMAT", "deepseek").strip()
-        self.llama_server_reasoning_budget = self._env_int("AIEQ_LLAMA_SERVER_REASONING_BUDGET", 1024)
+        self.llama_server_reasoning_budget = self._env_int("AIEQ_LLAMA_SERVER_REASONING_BUDGET", DEFAULT_LLAMA_SERVER_REASONING_BUDGET)
         self.llama_server_cache_ram = self._env_int("AIEQ_LLAMA_SERVER_CACHE_RAM", 0)
-        self.llama_server_require_gpu = self._env_bool("AIEQ_LLAMA_SERVER_REQUIRE_GPU", False)
+        self.llama_server_require_gpu = self._env_bool("AIEQ_LLAMA_SERVER_REQUIRE_GPU", True)
         self.llama_server_extra_args = os.environ.get("AIEQ_LLAMA_SERVER_EXTRA_ARGS", "").strip()
         log_path = os.environ.get("AIEQ_LLAMA_SERVER_LOG_PATH", "").strip()
         self.llama_server_log_path = Path(log_path).expanduser() if log_path else self._default_llama_server_log_path()
@@ -381,6 +382,17 @@ class AiEqualizerService:
                 if result.connected:
                     return result
             return self._not_connected(result.raw_json)
+        result = self._suggest_with_llama_server(
+            user_text,
+            current_preset,
+            saved_presets=saved_presets,
+            model_path=model_path,
+            device_curve=device_curve,
+            chat_history=chat_history,
+            force_cpu=True,
+        )
+        if result.connected:
+            return result
         result = self._suggest_with_llama_cpp(
             user_text,
             current_preset,
@@ -412,19 +424,20 @@ class AiEqualizerService:
         model_path: Path | None = None,
         device_curve: FrequencyCurve | None = None,
         chat_history: list[dict[str, str]] | None = None,
+        force_cpu: bool = False,
     ) -> AiPresetResult:
-        model_path = (model_path or self.llama_model_path).expanduser()
+        model_path = self._resolve_model_path(model_path)
         if not model_path.exists():
             return self._not_connected(f"Model file not found: {model_path}")
         try:
-            self._ensure_llama_server(model_path)
+            self._ensure_llama_server(model_path, force_cpu=force_cpu)
             return self._run_llama_server_request(
                 user_text,
                 current_preset,
                 saved_presets=saved_presets,
                 device_curve=device_curve,
                 model_path=model_path,
-                compact=False,
+                compact=True,
                 chat_history=chat_history,
             )
         except Exception as exc:  # noqa: BLE001
@@ -473,9 +486,11 @@ class AiEqualizerService:
             raw_json=raw,
         )
 
-    def _ensure_llama_server(self, model_path: Path) -> None:
+    def _ensure_llama_server(self, model_path: Path, *, force_cpu: bool = False) -> None:
+        if self._llama_server_process is not None and self._llama_server_process.poll() is not None:
+            self._llama_server_process = None
         if self._llama_server_is_alive():
-            if self.llama_server_require_gpu:
+            if self.llama_server_require_gpu and not force_cpu:
                 server_path = self._resolve_llama_server_path()
                 if server_path is None:
                     raise RuntimeError("llama-server GPU check failed: runtime executable was not found")
@@ -488,16 +503,11 @@ class AiEqualizerService:
         if server_path is None:
             raise RuntimeError("llama-server.exe not found; install llama.cpp runtime or use llama_cpp provider")
 
-        if self.llama_server_require_gpu:
+        if self.llama_server_require_gpu and not force_cpu:
             self._ensure_requested_server_device(server_path)
 
-        args = self._llama_server_args(server_path, model_path)
-        creationflags = 0
-        startupinfo = None
-        if os.name == "nt":
-            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            startupinfo = subprocess.STARTUPINFO()
-            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        args = self._llama_server_args(server_path, model_path, force_cpu=force_cpu)
+        hidden_kwargs = self._hidden_subprocess_kwargs()
         log_file = self._open_llama_server_log()
         self._llama_server_process = subprocess.Popen(  # noqa: S603 - user-configured local executable.
             args,
@@ -506,8 +516,7 @@ class AiEqualizerService:
             stdin=subprocess.DEVNULL,
             cwd=str(server_path.parent),
             env=self._llama_server_env(server_path),
-            creationflags=creationflags,
-            startupinfo=startupinfo,
+            **hidden_kwargs,
         )
         deadline = time.monotonic() + self.llama_server_startup_timeout
         while time.monotonic() < deadline:
@@ -527,11 +536,11 @@ class AiEqualizerService:
         self._llama_server_log_file.flush()
         return self._llama_server_log_file
 
-    def _llama_server_args(self, server_path: Path, model_path: Path) -> list[str]:
+    def _llama_server_args(self, server_path: Path, model_path: Path, *, force_cpu: bool = False) -> list[str]:
         args = [
             str(server_path.resolve()),
             "-m",
-            str(model_path.resolve()),
+            self._llama_server_model_arg(server_path, model_path),
             "-c",
             str(self.llama_n_ctx),
             "-b",
@@ -543,7 +552,7 @@ class AiEqualizerService:
             "-tb",
             str(self.llama_n_threads),
             "-ngl",
-            self._server_gpu_layers(),
+            "0" if force_cpu else self._server_gpu_layers(),
             "-np",
             str(self.llama_server_parallel),
             "-a",
@@ -560,7 +569,7 @@ class AiEqualizerService:
             "--log-timestamps",
             "--log-prefix",
         ]
-        if self.llama_server_device and self.llama_server_device.casefold() != "auto":
+        if not force_cpu and self.llama_server_device and self.llama_server_device.casefold() != "auto":
             args.extend(["--device", self.llama_server_device])
         if self.llama_server_flash_attn:
             args.extend(["-fa", self.llama_server_flash_attn])
@@ -577,6 +586,13 @@ class AiEqualizerService:
             args.extend(shlex.split(self.llama_server_extra_args, posix=os.name != "nt"))
         return args
 
+    @staticmethod
+    def _llama_server_model_arg(server_path: Path, model_path: Path) -> str:
+        try:
+            return os.path.relpath(model_path.resolve(), start=server_path.parent.resolve())
+        except ValueError:
+            return str(model_path.resolve())
+
     def _ensure_requested_server_device(self, server_path: Path) -> None:
         report = self._llama_server_device_report(server_path)
         if self._server_device_report_matches(report):
@@ -585,7 +601,7 @@ class AiEqualizerService:
         raise RuntimeError(
             f"llama-server does not see requested device {requested}. "
             "Install the llama.cpp CUDA DLL archive next to llama-server.exe and rerun "
-            "`runtime\\llama.cpp\\llama-server.exe --list-devices`."
+            "`runtime\\llama-server.exe --list-devices`."
         )
 
     def _ensure_running_server_matches_config(self, model_path: Path) -> None:
@@ -619,10 +635,23 @@ class AiEqualizerService:
                 text=True,
                 timeout=15,
                 check=False,
+                **self._hidden_subprocess_kwargs(),
             )
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError(f"llama-server GPU check failed: {exc}") from exc
         return f"{completed.stdout}\n{completed.stderr}"
+
+    @staticmethod
+    def _hidden_subprocess_kwargs() -> dict[str, Any]:
+        if os.name != "nt":
+            return {}
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
+        return {
+            "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            "startupinfo": startupinfo,
+        }
 
     def _server_device_report_matches(self, report: str) -> bool:
         folded = report.casefold()
@@ -647,19 +676,25 @@ class AiEqualizerService:
         candidates = [
             self.llama_server_path,
             Path("llama-server.exe"),
-            Path("runtime/llama.cpp/llama-server.exe"),
-            Path("runtime/llama.cpp/cuda/llama-server.exe"),
-            Path("runtime/llama.cpp/vulkan/llama-server.exe"),
-            Path("runtime/llama.cpp/cpu/llama-server.exe"),
+            Path("runtime/llama-server.exe"),
         ]
         for candidate in candidates:
-            expanded = candidate.expanduser()
+            expanded = resolve_app_path(candidate)
             if expanded.exists():
                 return expanded.resolve()
         found = shutil.which("llama-server.exe") or shutil.which("llama-server")
         if found:
             return Path(found).resolve()
         return None
+
+    def _resolve_model_path(self, model_path: Path | None) -> Path:
+        candidate = (model_path or self.llama_model_path).expanduser()
+        if candidate.exists():
+            return candidate
+        fallback_models = list_local_models()
+        if fallback_models:
+            return fallback_models[0]
+        return candidate
 
     def _llama_server_is_alive(self) -> bool:
         try:
@@ -722,7 +757,7 @@ class AiEqualizerService:
         device_curve: FrequencyCurve | None = None,
         chat_history: list[dict[str, str]] | None = None,
     ) -> AiPresetResult:
-        model_path = (model_path or self.llama_model_path).expanduser()
+        model_path = self._resolve_model_path(model_path)
         if not model_path.exists():
             return self._not_connected(f"Model file not found: {model_path}")
 
@@ -739,7 +774,7 @@ class AiEqualizerService:
                 saved_presets=saved_presets,
                 device_curve=device_curve,
                 model_path=model_path,
-                compact=False,
+                compact=True,
                 chat_history=chat_history,
             )
         except Exception as exc:  # noqa: BLE001
@@ -813,7 +848,7 @@ class AiEqualizerService:
             "referenced_preset": referenced_preset,
             "conversation_history": self._serialize_chat_history(chat_history, compact=compact),
             "current_device": self._serialize_device_curve(device_curve, compact=compact),
-            "language": "ru",
+            "assistant_message_language": "same_as_user_request",
             "output_contract": "JSON object with assistant_message and filters; every filter has type, freq, q, gain, enabled.",
             "compact_context": compact,
         }
@@ -984,7 +1019,7 @@ class AiEqualizerService:
             "referenced_preset": self._serialize_referenced_preset(saved_presets, user_text),
             "conversation_history": self._serialize_chat_history(chat_history),
             "current_device": self._serialize_device_curve(device_curve),
-            "language": "ru",
+            "assistant_message_language": "same_as_user_request",
         }
         try:
             client = OpenAI(api_key=api_key)
@@ -1183,6 +1218,8 @@ class AiEqualizerService:
         return [items[index] for index in indexes]
 
     def _not_connected(self, raw_json: str | None = None) -> AiPresetResult:
+        if raw_json:
+            self._write_ai_error_log(raw_json)
         return AiPresetResult(
             preset=None,
             assistant_message=NOT_CONNECTED_MESSAGE,
@@ -1190,6 +1227,17 @@ class AiEqualizerService:
             connected=False,
             raw_json=raw_json,
         )
+
+    def _write_ai_error_log(self, message: str) -> None:
+        try:
+            log_path = self.llama_server_log_path
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with log_path.open("a", encoding="utf-8") as file:
+                file.write(f"\n=== AIEQ AI error {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n")
+                file.write(message.rstrip())
+                file.write("\n")
+        except Exception:
+            pass
 
     @staticmethod
     def _env_int(name: str, default: int) -> int:

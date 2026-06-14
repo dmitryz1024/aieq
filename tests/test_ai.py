@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import subprocess
 from pathlib import Path
 from typing import Any, cast
 
@@ -89,6 +91,11 @@ def test_system_prompt_discourages_destructive_pass_filters_for_normal_tone() ->
     assert "For ordinary tone requests, use peaking plus low_shelf/high_shelf as the default vocabulary" in SYSTEM_PROMPT
     assert "Use band_pass only for intentional isolation or special effects" in SYSTEM_PROMPT
     assert "Pass and band-pass filters are high-impact and should be rare in everyday presets" in SYSTEM_PROMPT
+
+
+def test_system_prompt_matches_assistant_message_language_to_user_request() -> None:
+    assert "same language as the latest user_request" in SYSTEM_PROMPT
+    assert "Respond in Russian" not in SYSTEM_PROMPT
 
 
 def test_device_curve_context_includes_raw_txt() -> None:
@@ -204,8 +211,8 @@ def test_llama_server_request_uses_quality_defaults(monkeypatch) -> None:
 
     monkeypatch.setattr(service, "_http_json", fake_http)
     service._llama_server_chat_json([{"role": "user", "content": "test"}], Path("model.gguf"))
-    assert captured["temperature"] == 0.35
-    assert captured["max_tokens"] == 2048
+    assert captured["temperature"] == 0.25
+    assert captured["max_tokens"] == 900
     assert "top_p" not in captured
     assert "top_k" not in captured
     assert "min_p" not in captured
@@ -244,6 +251,8 @@ def test_chat_history_enters_llama_payload() -> None:
         {"role": "assistant", "content": "Добавил воздуха."},
     ]
     assert payload["referenced_preset"] is None
+    assert payload["assistant_message_language"] == "same_as_user_request"
+    assert "language" not in payload
 
 
 def test_context_limit_errors_are_detected() -> None:
@@ -257,7 +266,7 @@ def test_auto_provider_tries_llama_server_before_llama_cpp(monkeypatch) -> None:
     monkeypatch.setenv("AIEQ_AI_ALLOW_CPU_FALLBACK", "1")
 
     def fake_server(*args, **kwargs):
-        calls.append("server")
+        calls.append("server_cpu" if kwargs.get("force_cpu") else "server")
         return service._not_connected("server missing")
 
     def fake_cpp(*args, **kwargs):
@@ -267,7 +276,7 @@ def test_auto_provider_tries_llama_server_before_llama_cpp(monkeypatch) -> None:
     monkeypatch.setattr(service, "_suggest_with_llama_server", fake_server)
     monkeypatch.setattr(service, "_suggest_with_llama_cpp", fake_cpp)
     service.suggest_preset("непонятный запрос без шаблона", flat_preset())
-    assert calls[:2] == ["server", "cpp"]
+    assert calls[:3] == ["server", "server_cpu", "cpp"]
 
 
 def test_auto_provider_can_block_cpu_fallback(monkeypatch) -> None:
@@ -290,6 +299,45 @@ def test_auto_provider_can_block_cpu_fallback(monkeypatch) -> None:
     assert calls == ["server"]
     assert result.connected is False
     assert result.raw_json == "server missing"
+
+
+def test_llama_server_uses_compact_context_by_default(monkeypatch, tmp_path) -> None:
+    service = AiEqualizerService()
+    model = tmp_path / "Qwen3-4B-Q4_K_M.gguf"
+    model.write_text("", encoding="utf-8")
+    compact_values: list[bool] = []
+
+    monkeypatch.setattr(service, "_ensure_llama_server", lambda *args, **kwargs: None)
+
+    def fake_request(*args, **kwargs):
+        compact_values.append(bool(kwargs["compact"]))
+        return service._not_connected("stop")
+
+    monkeypatch.setattr(service, "_run_llama_server_request", fake_request)
+    service._suggest_with_llama_server("сделай мягче", flat_preset(), model_path=model)
+
+    assert compact_values == [True]
+
+
+def test_llama_server_defaults_require_cuda_gpu(monkeypatch, tmp_path) -> None:
+    monkeypatch.delenv("AIEQ_AI_ALLOW_CPU_FALLBACK", raising=False)
+    monkeypatch.delenv("AIEQ_LLAMA_SERVER_DEVICE", raising=False)
+    monkeypatch.delenv("AIEQ_LLAMA_SERVER_REQUIRE_GPU", raising=False)
+    server = tmp_path / "runtime" / "llama-server.exe"
+    model = tmp_path / "models" / "Qwen3-4B-Q4_K_M.gguf"
+    server.parent.mkdir(parents=True)
+    model.parent.mkdir(parents=True)
+    server.write_text("", encoding="utf-8")
+    model.write_text("", encoding="utf-8")
+
+    service = AiEqualizerService()
+    args = service._llama_server_args(server, model)
+
+    assert service.ai_allow_cpu_fallback is False
+    assert service.llama_server_require_gpu is True
+    assert service.llama_server_device == "CUDA0"
+    assert args[args.index("-ngl") + 1] == "all"
+    assert args[args.index("--device") + 1] == "CUDA0"
 
 
 def test_llama_server_args_prefer_single_cuda_slot(monkeypatch, tmp_path) -> None:
@@ -316,13 +364,58 @@ def test_llama_server_args_prefer_single_cuda_slot(monkeypatch, tmp_path) -> Non
     assert "--no-webui" in args
 
 
-def test_llama_server_args_enable_reasoning_by_default(tmp_path) -> None:
+def test_llama_server_model_arg_is_relative_to_runtime_for_unicode_paths(tmp_path) -> None:
+    root = tmp_path / "Приложения и утилиты" / "aieq"
+    server = root / "runtime" / "llama-server.exe"
+    model = root / "models" / "Qwen3-4B-Q4_K_M.gguf"
+    server.parent.mkdir(parents=True)
+    model.parent.mkdir(parents=True)
+    server.write_text("", encoding="utf-8")
+    model.write_text("", encoding="utf-8")
+
+    args = AiEqualizerService()._llama_server_args(server, model)
+    assert args[args.index("-m") + 1] == r"..\models\Qwen3-4B-Q4_K_M.gguf"
+
+
+def test_llama_server_args_use_limited_reasoning_by_default(tmp_path) -> None:
     server = tmp_path / "llama-server.exe"
     model = tmp_path / "Qwen3-4B-Q4_K_M.gguf"
     server.write_text("", encoding="utf-8")
     model.write_text("", encoding="utf-8")
 
-    args = AiEqualizerService()._llama_server_args(server, model)
+    service = AiEqualizerService()
+    args = service._llama_server_args(server, model)
+
+    assert service.llama_n_ctx == 8192
+    assert service.llama_n_batch == 512
+    assert service.llama_max_tokens == 900
+    assert service.llama_temperature == 0.25
     assert args[args.index("-rea") + 1] == "auto"
     assert args[args.index("--reasoning-format") + 1] == "deepseek"
-    assert args[args.index("--reasoning-budget") + 1] == "1024"
+    assert args[args.index("--reasoning-budget") + 1] == "192"
+
+
+def test_llama_server_device_probe_uses_hidden_windows_process(monkeypatch, tmp_path) -> None:
+    server = tmp_path / "llama-server.exe"
+    server.write_text("", encoding="utf-8")
+    captured: dict[str, Any] = {}
+
+    def fake_run(*args: Any, **kwargs: Any) -> Any:
+        captured.update(kwargs)
+
+        class Completed:
+            stdout = "CUDA0"
+            stderr = ""
+
+        return Completed()
+
+    service = AiEqualizerService()
+    monkeypatch.setattr("source.ai.subprocess.run", fake_run)
+    assert "CUDA0" in service._llama_server_device_report(server)
+
+    if os.name == "nt":
+        assert captured["creationflags"] == getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        assert captured["startupinfo"] is not None
+    else:
+        assert "creationflags" not in captured
+        assert "startupinfo" not in captured

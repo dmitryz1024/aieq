@@ -6,15 +6,16 @@ from pathlib import Path
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
-from .config import load_env_file
+from .config import app_root, load_env_file
 from .ui import MainWindow
 
 
 def resource_path(relative_path: str) -> Path:
     relative = Path(relative_path)
     candidates = [
-        Path(getattr(sys, "_MEIPASS")) / relative if hasattr(sys, "_MEIPASS") else None,
         Path.cwd() / relative,
+        app_root() / relative,
+        Path(getattr(sys, "_MEIPASS")) / relative if hasattr(sys, "_MEIPASS") else None,
         Path(__file__).resolve().parent.parent / relative,
     ]
     for candidate in candidates:

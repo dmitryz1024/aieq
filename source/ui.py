@@ -68,6 +68,7 @@ from .ai import AiEqualizerService, AiPresetResult, list_local_models, read_gguf
 from .audio import AudioDevice, AudioEngine, AudioStreamSetting, list_audio_devices, list_supported_stream_settings, refresh_audio_backend
 from .autoeq_service import AutoEqPresetResult, build_autoeq_preset_result
 from .chat_storage import ChatSession, ChatStore, chat_title_from_first_user_message
+from .config import app_root
 from .curves import DEVICE_CURVES_DIR, TARGET_CURVES_DIR, FrequencyCurve, ensure_curve_dirs, list_curves
 from .dsp import DEFAULT_SAMPLE_RATE, GRAPH_FREQS, preset_response_db
 from .models import FILTER_TYPES, EqFilter, Preset, flat_preset
@@ -212,8 +213,9 @@ def wheel_steps_from_event(event) -> int:
 def resource_path(relative_path: str) -> Path:
     relative = Path(relative_path)
     candidates = [
-        Path(getattr(sys, "_MEIPASS")) / relative if hasattr(sys, "_MEIPASS") else None,
         Path.cwd() / relative,
+        app_root() / relative,
+        Path(getattr(sys, "_MEIPASS")) / relative if hasattr(sys, "_MEIPASS") else None,
         Path(__file__).resolve().parent.parent / relative,
     ]
     for candidate in candidates:

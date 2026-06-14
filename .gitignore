@@ -17,12 +17,15 @@ py_tmp_manual/
 build/
 dist/
 release/
+installer/
 *.egg-info/
 .env
 *.sqlite3
 *.db
+AIEQ.spec
 finetuning/
-runtime/llama.cpp/*
+scripts/*.ps1
+runtime/*
 models/*.gguf
 models/*.bin
 models/*.safetensors
